@@ -1,4 +1,15 @@
+---
+title: Echo
+emoji: 📈
+colorFrom: purple
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Echo: Multi-Agent Investment Committee for Indian Equity Markets
+
 
 Echo is a highly secure, ~~local-first~~ Multi-Agent Investment Committee designed specifically for the Indian Equity Markets (BSE/NSE). **[2026-06-11T20:55:00+05:30] Update**: Echo will be deployed directly to Hugging Face Spaces. The system prioritizes strict risk management, probabilistic forecasting over binary guessing, late-stage FOMO exhaustion tracking, and complete data privacy.
 
