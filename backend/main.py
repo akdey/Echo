@@ -2,8 +2,11 @@ import asyncio
 import json
 import logging
 from typing import Dict, Any
+import os
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -106,6 +109,15 @@ async def stream_pipeline():
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+# Mount React static files if the directory exists
+frontend_dist_path = "frontend/dist"
+if os.path.exists(frontend_dist_path):
+    app.mount("/", StaticFiles(directory=frontend_dist_path, html=True), name="static")
+    logger.info("React frontend assets mounted successfully from %s", frontend_dist_path)
+else:
+    logger.warning("React frontend assets path not found at %s. API running in standalone mode.", frontend_dist_path)
+
 if __name__ == "__main__":
+
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)

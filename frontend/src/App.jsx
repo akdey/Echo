@@ -24,6 +24,8 @@ import {
   Briefcase
 } from "lucide-react";
 
+const API_URL = import.meta.env.VITE_API_URL || "";
+
 export default function App() {
   const [tickerInput, setTickerInput] = useState("RELIANCE");
   const [loading, setLoading] = useState(false);
@@ -77,7 +79,10 @@ export default function App() {
 
   // Subscribe to SSE updates
   useEffect(() => {
-    const sse = new EventSource("http://127.0.0.1:8000/api/stream_pipeline");
+    // Use dynamic API_URL for cross-domain Vercel deployment
+    const sse = new EventSource(`${API_URL}/api/stream_pipeline`);
+
+
     sse.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -120,7 +125,10 @@ export default function App() {
     setLogs([]);
     setCurrentNode("discovery");
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/analyze", {
+      // Use dynamic API_URL for cross-domain Vercel deployment
+      const response = await fetch(`${API_URL}/api/analyze`, {
+
+
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticker: tickerInput })

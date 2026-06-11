@@ -1,0 +1,27 @@
+name: Deploy to Hugging Face Spaces
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Deploy to Hugging Face Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Replace 'YOUR_HF_USERNAME/YOUR_SPACE_NAME' with your Hugging Face username and target Space name
+          HF_SPACE: "a-k-dey/Echo"
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git remote add hf "https://oauth:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}"
+          git push -f hf main
