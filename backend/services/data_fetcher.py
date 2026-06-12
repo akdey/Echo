@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import urllib.request
+import csv
+import io
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import yfinance as yf
@@ -8,19 +11,37 @@ from backend.services.redis_pipeline import RedisPipeline
 
 logger = logging.getLogger(__name__)
 
-# List of liquid Nifty 50 constituents (example subset for screening and safety testing)
-DEFAULT_TICKERS = [
-    "RELIANCE.NS",
-    "TCS.NS",
-    "HDFCBANK.NS",
-    "BHARTIARTL.NS",
-    "ICICIBANK.NS",
-    "INFY.NS",
-    "SBI.NS",
-    "LICI.NS",
-    "ITC.NS",
-    "HINDUNILVR.NS"
-]
+def fetch_nifty500_tickers() -> List[str]:
+    """
+    Fetches the official Nifty 500 constituents from the NSE archives.
+    Returns yfinance-compatible ticker symbols (e.g. RELIANCE.NS).
+    """
+    url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            content = response.read().decode('utf-8')
+        
+        reader = csv.DictReader(io.StringIO(content))
+        tickers = []
+        for row in reader:
+            symbol = row.get('Symbol')
+            if symbol:
+                tickers.append(symbol.strip() + ".NS")
+        if tickers:
+            logger.info("Successfully fetched %d tickers from NSE Nifty 500 list", len(tickers))
+            return tickers
+    except Exception as e:
+        logger.error("Failed to fetch official Nifty 500 list: %s. Falling back to active benchmark list.", str(e))
+    
+    # Active institutional benchmark fallback list
+    return [
+        "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "BHARTIARTL.NS", "ICICIBANK.NS",
+        "INFY.NS", "SBI.NS", "LICI.NS", "ITC.NS", "HINDUNILVR.NS", "TATAMOTORS.NS",
+        "ONGC.NS", "ADANIENT.NS", "AXISBANK.NS", "LT.NS", "KOTAKBANK.NS",
+        "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS", "NTPC.NS"
+    ]
 
 class DataFetcher:
     """
@@ -79,10 +100,13 @@ class DataFetcher:
             logger.error("Error fetching/caching data for %s: %s", ticker, str(e), exc_info=True)
             return False
 
-    async def sync_shortlist(self, tickers: List[str] = DEFAULT_TICKERS, period: str = "60d", interval: str = "1d") -> Dict[str, bool]:
+    async def sync_shortlist(self, tickers: List[str] = None, period: str = "60d", interval: str = "1d") -> Dict[str, bool]:
         """
         Synchronize multiple tickers concurrently to update the local Redis twin states.
         """
+        if tickers is None:
+            tickers = fetch_nifty500_tickers()
+            
         tasks = [self.fetch_and_cache_ticker(ticker, period, interval) for ticker in tickers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         

@@ -434,7 +434,7 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
             {/* Historical Price Trend */}
-            <div className="glass-panel p-5">
+            <div className="glass-panel p-5 min-h-0 min-w-0">
               <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
                 <span>30-Day Historical Trend & Moving Averages</span>
                 <span className="echo-tooltip">
@@ -445,8 +445,8 @@ export default function App() {
                 </span>
               </h3>
               
-              <div className="h-56 w-full">
-                <ResponsiveContainer width="100%" height="100%">
+              <div className="h-56 w-full min-h-0 min-w-0">
+                <ResponsiveContainer width="100%" height="100%" minHeight={224}>
                   <LineChart data={historicalData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="day" stroke="#475569" style={{ fontSize: 9, fontWeight: "bold" }} />
@@ -460,7 +460,7 @@ export default function App() {
             </div>
 
             {/* Kronos Monte Carlo Projections */}
-            <div className="glass-panel p-5">
+            <div className="glass-panel p-5 min-h-0 min-w-0">
               <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
                 <span>Kronos Autoregressive Monte Carlo (24 Days Future)</span>
                 <span className="echo-tooltip">
@@ -471,8 +471,8 @@ export default function App() {
                 </span>
               </h3>
               
-              <div className="h-56 w-full">
-                <ResponsiveContainer width="100%" height="100%">
+              <div className="h-56 w-full min-h-0 min-w-0">
+                <ResponsiveContainer width="100%" height="100%" minHeight={224}>
                   <AreaChart data={projectionData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="step" stroke="#475569" style={{ fontSize: 9, fontWeight: "bold" }} />

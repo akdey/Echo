@@ -1,15 +1,19 @@
 import logging
 import http.client
 import json
-import random
+import re
 from typing import Dict, Any, Literal
 from langgraph.graph import StateGraph, END
+import yfinance as yf
 
 from backend.agents.state import CommitteeState
 from backend.services.redis_pipeline import RedisPipeline
 from backend.services.trend_models import TrendEvaluator
 from backend.services.valuation_models import ValuationEvaluator
 from backend.services.order_book import OrderBookAnalyzer
+from backend.services.fundamental_rag import FundamentalInvestigator
+from backend.services.sentiment_analyzer import SentimentAnalyzer
+from backend.services.llm_gateway import query_llm
 
 logger = logging.getLogger(__name__)
 
@@ -157,19 +161,86 @@ async def sentiment_validation_node(state: CommitteeState) -> Dict[str, Any]:
     log_msg = f"[Sentiment Desk] Ingesting morning news and auditing unscripted analyst Q&A divergence..."
     logger.info(log_msg)
     
-    # Simulate news sentiment and transcript unscripted Q&A divergence
-    # Divergence calculation: prepared speech score vs unscripted Q&A score
-    # A positive divergence indicates management is hiding margin/demand warnings.
-    qa_divergence = round(random.uniform(0.0, 0.4), 2)
-    sentiment_val = round(random.uniform(0.4, 0.95), 2)
+    redis_pipeline = RedisPipeline()
+    await redis_pipeline.connect()
     
+    # 1. Fetch real cached news sentiment from Redis, or run on-the-fly if missing
+    sentiment_val = 0.5
+    try:
+        cached_sentiment = await redis_pipeline.fetch_indicator(state.ticker, "sentiment")
+        if cached_sentiment and "sentiment_score" in cached_sentiment:
+            sentiment_val = cached_sentiment["sentiment_score"]
+        else:
+            analyzer = SentimentAnalyzer(redis_pipeline)
+            res = await analyzer.analyze_sentiment(state.ticker)
+            sentiment_val = res.get("sentiment_score", 0.5)
+    except Exception as e:
+        logger.warning("[Sentiment Desk] Failed to load news sentiment for %s: %s", state.ticker, str(e))
+    
+    await redis_pipeline.disconnect()
+    
+    # 2. Query ChromaDB collection for transcript chunks and compute unscripted Q&A sentiment divergence via LLM
+    qa_divergence = 0.0
+    t_log = ""
+    try:
+        investigator = FundamentalInvestigator()
+        # Retrieve transcript text chunks from local ChromaDB
+        results = investigator.collection.get(
+            where={"ticker": state.ticker, "source": "transcript"}
+        )
+        documents = results.get("documents", []) if results else []
+        
+        if documents:
+            full_transcript = "\n".join(documents)
+            # Use local Gemma (via Ollama) or Gemini API to find and score prepared speech vs Q&A section
+            prompt = f"""
+            You are an elite financial auditor. Analyze the following earnings call transcript of {state.ticker}:
+            ---
+            {full_transcript[:15000]}
+            ---
+            
+            Evaluate and rate:
+            1. The sentiment of the Prepared Remarks (management's scripted presentation) on a scale from 0.0 (bearish) to 1.0 (bullish).
+            2. The sentiment of the Analyst Q&A section (unscripted questions and answers) on a scale from 0.0 (bearish) to 1.0 (bullish).
+            
+            Compute the unscripted sentiment divergence: (Prepared Remarks Sentiment - Analyst Q&A Sentiment).
+            
+            Provide your response in JSON format:
+            {{"prepared_sentiment": float, "qa_sentiment": float, "divergence": float}}
+            """
+            
+            raw_response = await query_llm(prompt)
+            flags = None
+            if raw_response:
+                try:
+                    start_idx = raw_response.find("{")
+                    end_idx = raw_response.rfind("}") + 1
+                    if start_idx != -1 and end_idx != -1:
+                        flags = json.loads(raw_response[start_idx:end_idx])
+                except Exception as parse_err:
+                    logger.error("Failed to parse LLM transcript response: %s", str(parse_err))
+            
+            if flags:
+                prepared_score = flags.get("prepared_sentiment", 0.5)
+                qa_score = flags.get("qa_sentiment", 0.5)
+                qa_divergence = round(flags.get("divergence", prepared_score - qa_score), 2)
+                t_log = f" Prepared Remarks Sentiment: {prepared_score:.2f} | Q&A Sentiment: {qa_score:.2f}"
+            else:
+                logger.info("[Sentiment Desk] LLM transcript audit did not return parseable JSON. Skipping divergence.")
+        else:
+            logger.info("[Sentiment Desk] No earnings call transcripts found in ChromaDB for %s. Setting Q&A divergence to 0.00.", state.ticker)
+    except Exception as e:
+        logger.warning("[Sentiment Desk] Failed to fetch or analyze transcripts in ChromaDB for %s: %s", state.ticker, str(e))
+        
     is_bubble = sentiment_val >= 0.95
     is_panic = sentiment_val <= 0.40
     is_evasive = qa_divergence >= 0.35
     
     is_invalidated = is_bubble or is_panic or is_evasive
     
-    s_log = f"[Sentiment Desk] Global News Sentiment: {sentiment_val*100:.0f}% Bullish | Q&A Divergence: {qa_divergence:.2f}"
+    s_log = f"[Sentiment Desk] News Sentiment: {sentiment_val*100:.0f}% Bullish | Q&A Divergence: {qa_divergence:.2f}."
+    if t_log:
+        s_log += f" ({t_log})"
     logger.info(s_log)
     
     if is_invalidated:
@@ -202,9 +273,15 @@ async def simulation_gate_node(state: CommitteeState) -> Dict[str, Any]:
     candles = await redis_pipeline.fetch_ohlcva(state.ticker, "1d")
     await redis_pipeline.disconnect()
     
-    # Format mock history if empty
     if not candles:
-        candles = [{"timestamp": "2026-06-12", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 1000.0, "amount": 101000.0}]
+        sim_log = "[Simulation Gate] No historical OHLCV data available for regime simulation. Returning neutral parameters."
+        logger.warning(sim_log)
+        return {
+            "kronos_upside_prob": 0.5,
+            "kronos_vol_risk": 0.0,
+            "execution_status": "simulations_completed",
+            "logs": state.logs + [log_msg, sim_log]
+        }
         
     history = candles[-50:] # feed last 50 days to model
     
@@ -232,14 +309,14 @@ async def simulation_gate_node(state: CommitteeState) -> Dict[str, Any]:
             vol_risk = res_data["volatility_amplification"]
             sim_log = f"[Simulation Gate] Autoregressive rollouts completed. Upside Probability: {upside_prob:.1%} | Volatility Amplification: {vol_risk:.1%}"
         else:
-            sim_log = f"[Simulation Gate] Kronos service returned {response.status}. Falling back to default simulations."
-            upside_prob = 0.88 if state.timing_status == "Optimal Buy" else 0.60
-            vol_risk = 0.08
+            sim_log = f"[Simulation Gate] Kronos service returned {response.status}. Falling back to neutral parameters."
+            upside_prob = 0.5
+            vol_risk = 0.0
         conn.close()
     except Exception as e:
-        sim_log = f"[Simulation Gate] Connection to Kronos microservice failed ({str(e)}). Simulating fallback parameters."
-        upside_prob = 0.88 if state.timing_status == "Optimal Buy" else 0.60
-        vol_risk = 0.08
+        sim_log = f"[Simulation Gate] Connection to Kronos microservice failed ({str(e)}). Falling back to neutral parameters."
+        upside_prob = 0.5
+        vol_risk = 0.0
         
     logger.info(sim_log)
     
@@ -251,13 +328,27 @@ async def simulation_gate_node(state: CommitteeState) -> Dict[str, Any]:
     }
 
 async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
-    # Check Order Book Imbalance metrics before entry
-    # Generate mock L2 imbalance scores
-    wofi = round(random.uniform(-0.3, 0.8), 2)
-    iceberg = random.random() > 0.85
-    spoof = random.random() > 0.90
+    # Check L1 Order Book Imbalance from yfinance info to calculate real WOFI
+    wofi = 0.0
+    try:
+        ticker_obj = yf.Ticker(state.ticker)
+        info = ticker_obj.info
+        bid_size = info.get("bidSize", 0) or info.get("bid_size", 0) or 0
+        ask_size = info.get("askSize", 0) or info.get("ask_size", 0) or 0
+        
+        if bid_size + ask_size > 0:
+            wofi = round((bid_size - ask_size) / (bid_size + ask_size), 2)
+            logger.info("[Risk Arbiter] L1 order book fetched for %s. Bid Size: %d, Ask Size: %d -> WOFI: %+.2f", state.ticker, bid_size, ask_size, wofi)
+        else:
+            logger.info("[Risk Arbiter] L1 order book sizes empty or zero for %s. WOFI set to 0.00.", state.ticker)
+    except Exception as e:
+        logger.warning("[Risk Arbiter] Failed to fetch yfinance L1 book size for %s: %s. Setting WOFI to 0.00.", state.ticker, str(e))
+        
+    # L2 depth markers are disabled (set to False) because streaming feeds are not active
+    iceberg = False
+    spoof = False
     
-    o_log = f"[Risk Arbiter] L2 WOFI: {wofi:+.2f} | Iceberg Buyer: {iceberg} | Spoofing Alert: {spoof}"
+    o_log = f"[Risk Arbiter] L2 WOFI: {wofi:+.2f} | Iceberg Buyer: {iceberg} (L2 depth required) | Spoofing Alert: {spoof} (L2 depth required)"
     logger.info(o_log)
     
     # Sizings: allocate up to 2.0% virtual equity based on Kelly-inspired probability scaling

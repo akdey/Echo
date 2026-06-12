@@ -1,8 +1,9 @@
-import http.client
 import json
 import logging
 from typing import List, Dict, Any, Optional
 import chromadb
+
+from backend.services.llm_gateway import query_llm
 
 logger = logging.getLogger(__name__)
 
@@ -25,26 +26,21 @@ class DummyEmbeddingFunction:
     def name(self) -> str:
         return "DummyEmbeddingFunction"
 
-
-
-
 class FundamentalInvestigator:
     """
     Forensic Accounting RAG Engine utilizing ChromaDB for document storage/retrieval
-    and Ollama for qualitative auditor remark and promoter pledging analyses.
+    and unified LLM gateway for qualitative auditor remark and promoter pledging analyses.
     """
-    def __init__(self, db_path: str = "backend/data_store/chromadb", ollama_url: str = "http://localhost:11434"):
+    def __init__(self, db_path: str = "backend/data_store/chromadb"):
         # Set up a persistent local ChromaDB client
         self.chroma_client = chromadb.PersistentClient(path=db_path)
         # Use dummy local embedding function to avoid HF model downloads
         self.embedding_function = DummyEmbeddingFunction()
-        self.ollama_url = ollama_url
         self.collection_name = "forensic_accounting"
         self.collection = self.chroma_client.get_or_create_collection(
             name=self.collection_name,
             embedding_function=self.embedding_function
         )
-
 
     async def ingest_document_chunks(self, ticker: str, chunks: List[str]) -> None:
         """Embed and ingest corporate report text chunks into ChromaDB."""
@@ -58,36 +54,9 @@ class FundamentalInvestigator:
         )
         logger.info("Ingested %d text chunks into ChromaDB for ticker %s", len(chunks), ticker)
 
-    def _query_ollama(self, prompt: str) -> Optional[str]:
-        """Send a prompt directly to the local Ollama daemon."""
-        # Clean host/port from URL
-        clean_url = self.ollama_url.replace("http://", "").replace("https://", "")
-        parts = clean_url.split(":")
-        host = parts[0]
-        port = int(parts[1]) if len(parts) > 1 else 80
-
-        payload = {
-            "model": "llama3:8b",
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.0}
-        }
-        
-        try:
-            conn = http.client.HTTPConnection(host, port, timeout=10)
-            headers = {"Content-Type": "application/json"}
-            conn.request("POST", "/api/generate", json.dumps(payload), headers)
-            response = conn.getresponse()
-            data = json.loads(response.read().decode())
-            conn.close()
-            return data.get("response")
-        except Exception as e:
-            logger.warning("Local Ollama daemon call failed: %s. Falling back to local heuristic evaluator.", str(e))
-            return None
-
     def _evaluate_forensics_heuristically(self, text: str) -> Dict[str, Any]:
         """
-        Local fallback parser evaluating forensic accounting risks when Ollama is offline.
+        Local fallback parser evaluating forensic accounting risks when LLM is offline.
         Scans for keyword signatures of red flags.
         """
         flags = {
@@ -113,7 +82,7 @@ class FundamentalInvestigator:
     async def investigate_ticker(self, ticker: str) -> Dict[str, Any]:
         """
         Queries ChromaDB for corporate records on the ticker, checks for forensic red flags
-        via Ollama (or local fallback), and assigns a Fundamental Conviction Score.
+        via unified LLM (or local fallback), and assigns a Fundamental Conviction Score.
         """
         # Retrieve relevant chunks for forensic analysis
         results = self.collection.query(
@@ -150,10 +119,10 @@ class FundamentalInvestigator:
         {{"qualified_remarks": true/false, "promoter_pledging_spike": true/false, "operating_cash_flow_drop": true/false}}
         """
 
-        raw_response = self._query_ollama(prompt)
+        raw_response = await query_llm(prompt)
         
         flags = None
-        source = "ollama"
+        source = "llm"
         
         if raw_response:
             try:
@@ -163,7 +132,7 @@ class FundamentalInvestigator:
                 if start_idx != -1 and end_idx != -1:
                     flags = json.loads(raw_response[start_idx:end_idx])
             except Exception as e:
-                logger.error("Failed to parse Ollama JSON response: %s", str(e))
+                logger.error("Failed to parse LLM JSON response: %s", str(e))
 
         if not flags:
             logger.info("Using local heuristic fallback parser for forensic auditing.")
