@@ -1,3 +1,13 @@
+---
+title: Echo
+emoji: 📈
+colorFrom: purple
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Echo: Multi-Agent Investment Committee & Screener for Indian Equities
 
 Echo is an institutional-grade, automated stock screening and real-time risk visualization platform designed specifically for the Indian Equity Markets (BSE/NSE). 

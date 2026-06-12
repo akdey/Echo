@@ -20,11 +20,22 @@ jobs:
       - name: Deploy to Hugging Face Spaces
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          # Replace 'YOUR_HF_USERNAME/YOUR_SPACE_NAME' with your Hugging Face username and target Space name
           HF_SPACE: "a-k-dey/Echo"
         run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
+          # Create a clean deployment package with only backend, Dockerfile, and README
+          mkdir -p hf_deploy
+          cp -r backend hf_deploy/
+          cp Dockerfile hf_deploy/
+          cp README.md hf_deploy/
+          
+          # Initialize fresh git repository and push
+          cd hf_deploy
+          git init -b main
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
           git remote add hf "https://a-k-dey:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}"
+          git add .
+          git commit -m "Deploy production backend to Hugging Face Spaces"
           git push -f hf main
+
 
