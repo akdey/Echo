@@ -79,7 +79,7 @@ $$V^* = \frac{\text{EPS} \times (8.5 + 2g) \times 4.4}{Y}$$
 ### E. News, Sentiment, and Transcript Disclosures
 1. **FinBERT News Sentiment**: Scrapes headlines from RSS feeds (Yahoo Finance, Moneycontrol) and parses positive, negative, and neutral sentiment ratios.
 2. **Unscripted Q&A Sentiment Divergence**:
-   $$\text{Divergence} = \text{Prepared Remarks Sentiment} - \text{Analyst Q&A Sentiment}$$
+   $$\text{Divergence} = \text{Prepared Remarks Sentiment} - \text{Analyst Q\&A Sentiment}$$
    High divergence ($>0.35$) flags that management is evasive or hiding operational headwinds during unscripted analyst probing.
 
 ### F. Order Book Surveillance (Level 2/3)
