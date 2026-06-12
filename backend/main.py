@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -17,6 +17,16 @@ from backend.services.embeddings import generate_embedding
 from backend.services.conviction_engine import run_conviction_scoring
 from backend.services.sector_momentum_service import calculate_sector_momentum
 from backend.services.alert_dispatcher import dispatch_conviction_alerts
+from backend.services.risk_engine import (
+    MacroRegimeFilter,
+    PreMarketSanityCheck,
+    ChandelierExit,
+    KellyCriterion,
+    get_market_regime,
+    run_premarket_checks,
+    scan_exit_signals,
+    get_position_size,
+)
 from backend.services.supabase_client import (
     query_supabase,
     upsert_supabase,
@@ -572,6 +582,247 @@ async def trigger_nightly_job():
         results["conviction"] = {"status": "error", "detail": str(e)}
 
     return {"status": "success", "pipeline_results": results}
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# RISK ENGINE ENDPOINTS  (Phase 14)
+# ════════════════════════════════════════════════════════════════════════════════
+
+
+class ChandelierRequest(BaseModel):
+    symbol:       str
+    entry_date:   str           # ISO date "YYYY-MM-DD"
+    entry_price:  float
+
+
+class KellyRequest(BaseModel):
+    total_capital: float        # INR — total investable capital
+
+
+class PreMarketSymbolRequest(BaseModel):
+    symbol:            str
+    prev_close:        Optional[float] = None
+
+
+@app.get(
+    "/api/risk/regime",
+    summary="Macro Regime Filter",
+    description=(
+        "Evaluates whether the broad market is in RISK_ON or RISK_OFF mode. "
+        "RISK_OFF is triggered when: (1) Nifty 50 closes below its 20-day EMA, "
+        "(2) Nifty Midcap 150 closes below its 50-day EMA, or "
+        "(3) 5-day cumulative FII flow is below −60,000 Cr. "
+        "In RISK_OFF mode, the conviction engine suppresses all buy signals."
+    ),
+)
+async def get_regime_endpoint():
+    """
+    Returns current market regime with supporting metrics.
+    Use this before placing any trade to confirm the macro environment is constructive.
+    """
+    try:
+        return await get_market_regime()
+    except Exception as e:
+        logger.error("[API] /api/risk/regime failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/risk/premarket",
+    summary="Pre-Market Gap Check (All Open Positions)",
+    description=(
+        "Runs at 9:15:05 AM IST. Checks every open trade journal position for "
+        "abnormal gap-ups (> 3%) or gap-downs (> 2%) at the opening price. "
+        "Returns ABORT_GAP_UP, CAUTION_GAP_DOWN, or PROCEED for each position."
+    ),
+)
+async def premarket_all_positions():
+    """
+    Batch pre-market sanity check for all open journal positions.
+    Schedule this endpoint to be called at 9:15:05 AM IST via a cron or APScheduler.
+    """
+    try:
+        results = await run_premarket_checks()
+        aborts   = [r for r in results if r["action"] == "ABORT_GAP_UP"]
+        cautions = [r for r in results if r["action"] == "CAUTION_GAP_DOWN"]
+        proceed  = [r for r in results if r["action"] == "PROCEED"]
+        return {
+            "status":    "success",
+            "summary":   {
+                "abort_count":   len(aborts),
+                "caution_count": len(cautions),
+                "proceed_count": len(proceed),
+            },
+            "results":   results,
+        }
+    except Exception as e:
+        logger.error("[API] /api/risk/premarket failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/risk/premarket/symbol",
+    summary="Pre-Market Gap Check (Single Symbol)",
+)
+async def premarket_single_symbol(req: PreMarketSymbolRequest):
+    """
+    Checks a single NSE symbol for an opening gap.
+    Use before executing an AMO or placing a morning trade.
+    """
+    try:
+        checker = PreMarketSanityCheck()
+        return await checker.check_symbol(
+            symbol=req.symbol,
+            fallback_prev_close=req.prev_close,
+        )
+    except Exception as e:
+        logger.error("[API] /api/risk/premarket/symbol failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/risk/exits",
+    summary="Chandelier Exit Scan (All Open Positions)",
+    description=(
+        "Scans every open journal position and calculates the Chandelier Exit stop "
+        "(Highest High since entry − 3 × ATR14). Returns EXIT_SIGNAL for any position "
+        "where the latest close has broken below the trailing stop."
+    ),
+)
+async def scan_exits_endpoint():
+    """
+    Returns Chandelier Exit status for all open positions.
+    EXIT_SIGNAL positions are returned first.
+    Run this nightly or intraday after 3:30 PM IST.
+    """
+    try:
+        results    = await scan_exit_signals()
+        exits      = [r for r in results if r["action"] == "EXIT_SIGNAL"]
+        holds      = [r for r in results if r["action"] == "HOLD"]
+        return {
+            "status":        "success",
+            "exit_signals":  len(exits),
+            "hold_count":    len(holds),
+            "results":       results,
+        }
+    except Exception as e:
+        logger.error("[API] /api/risk/exits failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/risk/exit/symbol",
+    summary="Chandelier Exit (Single Symbol)",
+    description="Calculates the ATR14-based Chandelier trailing stop for a single open position.",
+)
+async def chandelier_single(req: ChandelierRequest):
+    """
+    Compute ATR-based trailing stop for a specific trade.
+    Useful for portfolio review before market open.
+    """
+    try:
+        engine = ChandelierExit()
+        return await engine.calculate_for_trade(
+            symbol=req.symbol,
+            entry_date=req.entry_date,
+            entry_price=req.entry_price,
+        )
+    except Exception as e:
+        logger.error("[API] /api/risk/exit/symbol failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/risk/position-size",
+    summary="Kelly Criterion Position Sizing",
+    description=(
+        "Calculates the mathematically optimal position size using Half-Kelly Criterion "
+        "derived from your historical journal win-rate and average R:R ratio. "
+        "Requires at least 20 closed trades in the journal for reliable output."
+    ),
+)
+async def position_size_endpoint(req: KellyRequest):
+    """
+    Returns the suggested allocation per trade as both a percentage and INR amount.
+    Minimum 20 closed trades required; below that threshold returns a conservative 2% default.
+    """
+    if req.total_capital <= 0:
+        raise HTTPException(status_code=400, detail="total_capital must be a positive number.")
+    try:
+        return await get_position_size(req.total_capital)
+    except Exception as e:
+        logger.error("[API] /api/risk/position-size failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/risk/portfolio",
+    summary="Full Portfolio Risk Scan",
+    description=(
+        "Runs all four risk layers simultaneously: "
+        "(1) Macro Regime Filter, "
+        "(2) Pre-Market Gap Check on all open positions, "
+        "(3) Chandelier Exit scan, "
+        "(4) Kelly position sizing for the given capital. "
+        "This is the master risk dashboard endpoint."
+    ),
+)
+async def portfolio_risk_scan(
+    capital: float = Query(default=1000000.0, description="Total investable capital in INR"),
+):
+    """
+    Master risk dashboard. Run this every morning before market open.
+    Returns regime, all pre-market gap checks, all exit signals, and position sizing.
+    """
+    results: Dict[str, Any] = {}
+
+    # Run all four layers concurrently
+    regime_task     = asyncio.create_task(get_market_regime())
+    premarket_task  = asyncio.create_task(run_premarket_checks())
+    exits_task      = asyncio.create_task(scan_exit_signals())
+    kelly_task      = asyncio.create_task(get_position_size(capital))
+
+    regime, premarket, exits, kelly = await asyncio.gather(
+        regime_task, premarket_task, exits_task, kelly_task,
+        return_exceptions=True,
+    )
+
+    results["regime"] = regime if not isinstance(regime, Exception) else {
+        "error": str(regime)
+    }
+    results["premarket_checks"] = {
+        "summary": {
+            "aborts":   len([r for r in (premarket or []) if isinstance(r, dict) and r.get("action") == "ABORT_GAP_UP"]),
+            "cautions": len([r for r in (premarket or []) if isinstance(r, dict) and r.get("action") == "CAUTION_GAP_DOWN"]),
+            "proceed":  len([r for r in (premarket or []) if isinstance(r, dict) and r.get("action") == "PROCEED"]),
+        },
+        "positions": premarket if not isinstance(premarket, Exception) else [],
+    }
+    results["exit_signals"] = {
+        "count":     len([r for r in (exits or []) if isinstance(r, dict) and r.get("action") == "EXIT_SIGNAL"]),
+        "positions": exits if not isinstance(exits, Exception) else [],
+    }
+    results["position_sizing"] = kelly if not isinstance(kelly, Exception) else {
+        "error": str(kelly)
+    }
+
+    # Overall risk status
+    regime_ok     = isinstance(regime, dict) and regime.get("regime") == "RISK_ON"
+    exit_count    = results["exit_signals"]["count"]
+    abort_count   = results["premarket_checks"]["summary"]["aborts"]
+    results["overall_status"] = (
+        "ALL_CLEAR" if (regime_ok and exit_count == 0 and abort_count == 0)
+        else "REVIEW_REQUIRED"
+    )
+    results["alerts"] = []
+    if not regime_ok:
+        results["alerts"].append(f"⛔ Market is RISK_OFF — no new positions should be opened.")
+    if exit_count > 0:
+        results["alerts"].append(f"⚠️ {exit_count} position(s) have triggered Chandelier Exit — review for sell.")
+    if abort_count > 0:
+        results["alerts"].append(f"🚨 {abort_count} trade(s) have gap-up > 3% at open — abort those AMOs.")
+
+    return {"status": "success", **results}
 
 
 if __name__ == "__main__":

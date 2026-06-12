@@ -33,6 +33,17 @@ from backend.services.supabase_client import rpc_supabase
 
 logger = logging.getLogger(__name__)
 
+# Lazy import to avoid circular deps — only imported at runtime inside the function
+_macro_regime_filter = None
+
+def _get_regime_filter():
+    global _macro_regime_filter
+    if _macro_regime_filter is None:
+        from backend.services.risk_engine import MacroRegimeFilter
+        _macro_regime_filter = MacroRegimeFilter()
+    return _macro_regime_filter
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Thematic seed queries – expanded regularly.
 # The engine scores a +20 if the company pgvector similarity to ANY seed >= 0.35
@@ -273,16 +284,52 @@ async def score_single_ticker(
 async def run_conviction_scoring(
     symbols: Optional[List[str]] = None,
     surveillance_symbols: Optional[set] = None,
+    skip_regime_check: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Runs the full conviction scoring loop over provided symbols (or all companies
     in Supabase) and upserts results to `conviction_matrix`.
+
+    ⚠️  REGIME GATE: Before scoring any individual stock, the Macro Regime Filter
+    is evaluated.  If the market is in RISK_OFF mode (Nifty < 20-EMA, or
+    5-day FII flow < -5000 Cr), ALL buy signals are suppressed and the function
+    returns a regime warning for every stock.  This is the most important
+    risk control in the system — when the tide goes out, all boats sink.
 
     Returns a list of all scored records, sorted descending by conviction_score.
     """
     if not IS_SUPABASE_CONFIGURED:
         logger.warning("[Conviction] Supabase not configured — aborting.")
         return []
+
+    # ── REGIME GATE ───────────────────────────────────────────────
+    if not skip_regime_check:
+        try:
+            regime_result = await _get_regime_filter().get_regime()
+            if regime_result["regime"] == "RISK_OFF":
+                triggers = regime_result.get("triggers", [])
+                verdict  = f"RISK_OFF — {' | '.join(triggers)}. No buy signals issued."
+                logger.warning(
+                    "[Conviction] ⛔ RISK_OFF mode detected. Suppressing all buy signals.\n"
+                    "Triggers: %s", triggers
+                )
+                # Return a single regime-warning record (not per-stock)
+                return [{
+                    "symbol":           "__MARKET__",
+                    "conviction_score": 0,
+                    "verdict":          verdict,
+                    "catalyst_tags":    triggers,
+                    "regime":           "RISK_OFF",
+                    "regime_details":   regime_result,
+                    "updated_at":       datetime.datetime.utcnow().isoformat(),
+                }]
+        except Exception as regime_err:
+            # Never let a regime check failure block scoring entirely
+            logger.warning(
+                "[Conviction] Regime check failed (%s) — proceeding without gate.",
+                regime_err
+            )
+
 
     surv = surveillance_symbols or set()
 
