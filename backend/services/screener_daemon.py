@@ -92,8 +92,19 @@ class ScreenerDaemon:
         self.redis_pipeline = redis_pipeline
         self.data_fetcher = DataFetcher(redis_pipeline)
         self.compliance = SEBIComplianceGatekeeper()
+        import os
         from backend.services.data_fetcher import fetch_nifty500_tickers
         self.tickers = fetch_nifty500_tickers()
+        
+        # Limit tickers in development mode to avoid rate limits
+        ticker_limit = os.getenv("SCREENER_TICKER_LIMIT")
+        if ticker_limit:
+            try:
+                limit_val = int(ticker_limit)
+                self.tickers = self.tickers[:limit_val]
+                logger.info("[Screener Daemon] Dev Mode: Limited ticker screening to first %d tickers", limit_val)
+            except ValueError:
+                pass
         
         self.compliance.set_surveillance_lists(
             asm=[],
@@ -133,7 +144,7 @@ class ScreenerDaemon:
         
         async with async_playwright() as p:
             logger.info("Starting multi-source FII/DII flow scraper...")
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=True, args=["--disable-http2"])
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800}
@@ -198,6 +209,7 @@ class ScreenerDaemon:
                         try:
                             def parse_val(v):
                                 v_clean = v.replace(",", "").replace("Cr", "").replace("₹", "").strip()
+                                v_clean = v_clean.replace("−", "-").replace("—", "-")  # Replace unicode minus/dash
                                 if "(" in v_clean and ")" in v_clean:
                                     v_clean = "-" + v_clean.replace("(", "").replace(")", "")
                                 return float(v_clean)
@@ -234,7 +246,7 @@ class ScreenerDaemon:
                 }
                 
                 try:
-                    prev_flows = await self.redis_pipeline.fetch_indicator("MARKET", "fii_dii_flows_history")
+                    prev_flows = await self.redis_pipeline.get_cached_indicator("MARKET", "fii_dii_flows_history")
                     if not prev_flows:
                         prev_flows = []
                     prev_flows.append({"fii": fii_net, "dii": dii_net})
@@ -276,19 +288,24 @@ class ScreenerDaemon:
             from playwright.async_api import async_playwright
             logger.info("[Screener Daemon] Scraping NSE surveillance lists (ASM/GSM/T2T)...")
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(headless=True, args=["--disable-http2"])
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1280, "height": 800}
                 )
                 page = await context.new_page()
                 
-                # Visit main page to set cookies
-                await page.goto("https://www.nseindia.com/", wait_until="networkidle", timeout=20000)
-                await asyncio.sleep(2)
+                # Visit main page to set cookies, with a short timeout, ignoring exceptions
+                try:
+                    logger.info("[Screener Daemon] Initializing NSE cookies...")
+                    await page.goto("https://www.nseindia.com/", wait_until="commit", timeout=10000)
+                    await asyncio.sleep(2)
+                except Exception as home_err:
+                    logger.warning("[Screener Daemon] Homepage load warning (ignored): %s", str(home_err))
                 
                 # Navigate to the surveillance reports page
-                await page.goto(url, wait_until="networkidle", timeout=30000)
+                logger.info("[Screener Daemon] Navigating to surveillance reports page...")
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 await asyncio.sleep(3)
                 
                 # Wait for table to render
@@ -357,15 +374,36 @@ class ScreenerDaemon:
         session = get_resilient_session()
         screened_candidates = []
         
+        # Fetch previous candidates to check for recent successful screenings
+        prev_candidates = await self.redis_pipeline.get_cached_indicator("SCREENER", "candidates")
+        cached_candidates_map = {c["ticker"]: c for c in prev_candidates} if prev_candidates else {}
+        
         for ticker in self.tickers:
             try:
+                # Check if ticker has been screened recently (within 12 hours)
+                if ticker in cached_candidates_map:
+                    candidate = cached_candidates_map[ticker]
+                    updated_at_str = candidate.get("updated_at")
+                    if updated_at_str:
+                        try:
+                            updated_at = datetime.fromisoformat(updated_at_str)
+                            elapsed = (datetime.now() - updated_at).total_seconds()
+                            if elapsed < 12 * 3600:
+                                # Re-use candidate directly
+                                logger.info("Using cached report for %s (screened %.1f hours ago)", ticker, elapsed / 3600)
+                                if not candidate.get("is_blocked"):
+                                    screened_candidates.append(candidate)
+                                continue
+                        except Exception as parse_err:
+                            logger.warning("Failed to parse updated_at for %s: %s", ticker, str(parse_err))
+
                 # Delay between tickers with randomized interval (2.0 to 5.0 seconds) to bypass WAF limits
                 sleep_interval = random.uniform(2.0, 5.0)
                 logger.info("Sleeping %.2f seconds before fetching next ticker: %s", sleep_interval, ticker)
                 await asyncio.sleep(sleep_interval)
                 
                 # 1. Fetch price data and sync to Redis
-                success = await self.data_fetcher.fetch_and_cache_ticker(ticker, period="250d", interval="1d")
+                success = await self.data_fetcher.fetch_and_cache_ticker(ticker, period="250d", interval="1d", session=session)
                 if not success:
                     logger.warning("Failed to fetch price history for %s", ticker)
                     continue
@@ -438,7 +476,8 @@ class ScreenerDaemon:
                     "fundamentals": valuation,
                     "buffett_scorecard": buffett_scorecard,
                     "surveillance": surveillance,
-                    "deals": deals
+                    "deals": deals,
+                    "updated_at": datetime.now().isoformat()
                 }
                 
                 await self.redis_pipeline.cache_indicator(ticker, "detailed_indicators", detailed_indicators)

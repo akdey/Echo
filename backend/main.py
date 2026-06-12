@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -12,6 +12,14 @@ from backend.agents.state import CommitteeState
 from backend.services.redis_pipeline import RedisPipeline
 from backend.services.screener_daemon import ScreenerDaemon
 from backend.services.thematic_engine import ThematicCatalystAnalyzer
+from backend.services.thematic_db import (
+    init_db,
+    add_node_async,
+    delete_node_async,
+    add_edge_async,
+    delete_edge_async,
+    get_graph_data_async
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -40,10 +48,30 @@ class TickerRequest(BaseModel):
 class ThematicRequest(BaseModel):
     catalyst_text: str
 
+class NodeModel(BaseModel):
+    id: str
+    type: str
+    label: str
+    description: Optional[str] = None
+
+class EdgeModel(BaseModel):
+    source_id: str
+    target_id: str
+    relation_type: str
+    weight: float = 1.0
+    role: Optional[str] = None
+    pricing_power: Optional[str] = None
+    catalyst_relevance: Optional[str] = None
+    timestamp: Optional[int] = None
+
 @app.on_event("startup")
 async def startup_event():
     """Initializes cached items on startup."""
-    logger.info("Initializing system cache and background worker checks...")
+    logger.info("Initializing system cache and database checks...")
+    
+    # Initialize the SQLite Graph database
+    init_db()
+    
     redis_pipeline = RedisPipeline()
     await redis_pipeline.connect()
     
@@ -136,6 +164,85 @@ async def thematic_analyze(payload: ThematicRequest):
         return results
     except Exception as e:
         logger.error("Failed to execute thematic analysis: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/thematic/graph")
+async def get_thematic_graph():
+    """Retrieves the full SQLite knowledge graph (nodes and edges)."""
+    try:
+        data = await get_graph_data_async()
+        return {"status": "success", "data": data}
+    except Exception as e:
+        logger.error("Failed to retrieve thematic graph: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/thematic/node")
+async def add_thematic_node(payload: NodeModel):
+    """Creates or updates a node in the SQLite graph database."""
+    try:
+        success = await add_node_async(payload.id, payload.type, payload.label, payload.description)
+        if success:
+            return {"status": "success", "message": f"Node '{payload.id}' added/updated."}
+        raise HTTPException(status_code=500, detail="Failed to add node.")
+    except Exception as e:
+        logger.error("Failed to add node: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/thematic/node/{node_id}")
+async def delete_thematic_node(node_id: str):
+    """Deletes a node from the SQLite graph database (cascades to edges)."""
+    try:
+        success = await delete_node_async(node_id)
+        if success:
+            return {"status": "success", "message": f"Node '{node_id}' and its connected edges deleted."}
+        raise HTTPException(status_code=500, detail=f"Failed to delete node '{node_id}'.")
+    except Exception as e:
+        logger.error("Failed to delete node: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/thematic/edge")
+async def add_thematic_edge(payload: EdgeModel):
+    """Creates or updates an edge in the SQLite graph database."""
+    try:
+        success = await add_edge_async(
+            payload.source_id,
+            payload.target_id,
+            payload.relation_type,
+            payload.weight,
+            payload.role,
+            payload.pricing_power,
+            payload.catalyst_relevance,
+            payload.timestamp
+        )
+        if success:
+            return {"status": "success", "message": f"Edge '{payload.source_id} -> {payload.target_id}' added/updated."}
+        raise HTTPException(status_code=500, detail="Failed to add edge.")
+    except Exception as e:
+        logger.error("Failed to add edge: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/thematic/edge/{edge_id}")
+async def delete_thematic_edge(edge_id: int):
+    """Deletes a specific edge from the SQLite graph database."""
+    try:
+        success = await delete_edge_async(edge_id)
+        if success:
+            return {"status": "success", "message": f"Edge '{edge_id}' deleted."}
+        raise HTTPException(status_code=500, detail=f"Failed to delete edge '{edge_id}'.")
+    except Exception as e:
+        logger.error("Failed to delete edge: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/thematic/crawl")
+async def trigger_thematic_crawl():
+    """Manually triggers the news/announcement crawler to find new corporate contract wins."""
+    redis_pipeline = RedisPipeline()
+    analyzer = ThematicCatalystAnalyzer(redis_pipeline)
+    try:
+        results = await analyzer.crawl_and_extract_news_catalysts()
+        return results
+    except Exception as e:
+        logger.error("Failed to execute news crawl: %s", str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stream_pipeline")
