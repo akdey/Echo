@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'backend/**'
-      - 'Dockerfile'
-      - '.github/workflows/deploy_to_hf.yml'
   workflow_dispatch:
 
 
