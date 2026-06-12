@@ -4,14 +4,13 @@ import logging
 from typing import Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-
-
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.agents.investment_committee import build_committee_graph
 from backend.agents.state import CommitteeState
 from backend.services.redis_pipeline import RedisPipeline
+from backend.services.screener_daemon import ScreenerDaemon
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Echo API Gateway",
     description="Bridge connecting the LangGraph Investment Committee to the React Dashboard Visualizer.",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # Enable CORS for local React/Vite development server
@@ -37,6 +36,43 @@ transition_queue = asyncio.Queue()
 class TickerRequest(BaseModel):
     ticker: str
 
+@app.on_event("startup")
+async def startup_event():
+    """Initializes cached items on startup."""
+    logger.info("Initializing system cache and background worker checks...")
+    redis_pipeline = RedisPipeline()
+    await redis_pipeline.connect()
+    
+    # Run initial screening task in a background task if cache is empty
+    candidates = await redis_pipeline.get_cached_indicator("SCREENER", "candidates")
+    if not candidates:
+        logger.info("Screener cache empty on startup. Triggering initial background crawler scan...")
+        daemon = ScreenerDaemon(redis_pipeline)
+        asyncio.create_task(daemon.execute_daily_screening())
+        
+    await redis_pipeline.disconnect()
+
+@app.get("/api/screen")
+async def get_screened_candidates():
+    """
+    Returns the list of candidates discovered by the background screening daemon.
+    """
+    redis_pipeline = RedisPipeline()
+    await redis_pipeline.connect()
+    try:
+        candidates = await redis_pipeline.get_cached_indicator("SCREENER", "candidates")
+        if not candidates:
+            # If not cached, trigger a quick scan and return results
+            logger.info("Screener cache empty during API request. Executing screening...")
+            daemon = ScreenerDaemon(redis_pipeline)
+            candidates = await daemon.execute_daily_screening()
+        return {"status": "success", "count": len(candidates), "candidates": candidates}
+    except Exception as e:
+        logger.error("Failed to fetch screened candidates: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await redis_pipeline.disconnect()
+
 @app.post("/api/analyze")
 async def analyze_ticker(payload: TickerRequest):
     """
@@ -45,7 +81,6 @@ async def analyze_ticker(payload: TickerRequest):
     """
     ticker = payload.ticker.upper()
     if not ticker.endswith(".NS") and not ticker.endswith(".BO"):
-        # Auto-append NSE suffix for convenience
         ticker += ".NS"
         
     logger.info("Initializing multi-agent analysis loop for ticker: %s", ticker)
@@ -58,9 +93,6 @@ async def analyze_ticker(payload: TickerRequest):
     )
     
     try:
-        # Run graph execution in the background, or sequentially while pushing updates
-        # Since each node updates the state, we can run graph steps using the LangGraph streaming API!
-        # LangGraph allows streaming updates after each node:
         final_state_dict = {}
         async for output in graph.astream(initial_state):
             # output contains a dict of {node_name: state_updates}
@@ -95,7 +127,6 @@ async def stream_pipeline():
     async def event_generator():
         while True:
             try:
-                # Wait for next state change update in the queue
                 msg = await transition_queue.get()
                 yield f"data: {json.dumps(msg)}\n\n"
                 transition_queue.task_done()
@@ -108,10 +139,6 @@ async def stream_pipeline():
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-
-
-
 if __name__ == "__main__":
-
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
