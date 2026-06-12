@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import asyncio
 import pandas as pd
@@ -13,163 +14,6 @@ from backend.services.redis_pipeline import RedisPipeline
 
 logger = logging.getLogger(__name__)
 
-# Core Knowledge Graph mapping sectors/catalysts to supply chain materials and listed Indian suppliers
-THEMATIC_KNOWLEDGE_GRAPH = {
-    "DEFENSE": {
-        "description": "Defense acquisition, military upgrades, and indigenization",
-        "suppliers": [
-            {
-                "symbol": "SOLARINDS.NS",
-                "name": "Solar Industries India",
-                "role": "Propellants and High-Energy Explosives supplier for missiles/rockets",
-                "pricing_power": "High (Monopoly/Duopoly)",
-                "catalyst_relevance": "Procurement of missiles, ammunition, and explosives"
-            },
-            {
-                "symbol": "PREMEXPLOS.NS",
-                "name": "Premier Explosives",
-                "role": "Solid Propellants and missile explosive material supplier",
-                "pricing_power": "High (Specialized monopoly)",
-                "catalyst_relevance": "Solid rocket motors, propellants"
-            },
-            {
-                "symbol": "MIDHANI.NS",
-                "name": "Mishra Dhatu Nigam",
-                "role": "Specialty steel, titanium alloys, and superalloys",
-                "pricing_power": "High (Strategic PSU monopoly)",
-                "catalyst_relevance": "Armor plates, missile casings, fighter jets, submarines"
-            },
-            {
-                "symbol": "BEL.NS",
-                "name": "Bharat Electronics",
-                "role": "Military radar, sonar, and avionics communication systems",
-                "pricing_power": "High (Defense electronics giant)",
-                "catalyst_relevance": "Electronics, systems integration, avionics"
-            },
-            {
-                "symbol": "HAL.NS",
-                "name": "Hindustan Aeronautics",
-                "role": "Fighter jets, helicopters, gas turbines, and structural aerospace components",
-                "pricing_power": "High (National aerospace monopoly)",
-                "catalyst_relevance": "Combat aircraft, helicopters, aerospace indigenization"
-            },
-            {
-                "symbol": "MAZDOCK.NS",
-                "name": "Mazagon Dock Shipbuilders",
-                "role": "Submarines, destroyers, and naval warships",
-                "pricing_power": "High (Naval PSU monopoly)",
-                "catalyst_relevance": "Warships, submarines, naval defense acquisition"
-            },
-            {
-                "symbol": "BEML.NS",
-                "name": "BEML Limited",
-                "role": "Heavy military trucks, missile launchers, and bulldozers",
-                "pricing_power": "High (Specialized defense PSU supplier)",
-                "catalyst_relevance": "Missile launchers, military transports, heavy ground systems"
-            }
-        ]
-    },
-    "RAILWAYS": {
-        "description": "Railway modernization, high-speed rail, wagon procurement, and metro lines",
-        "suppliers": [
-            {
-                "symbol": "TITAGARH.NS",
-                "name": "Titagarh Rail Systems",
-                "role": "Railway wagons, passenger coaches, and metro trainsets",
-                "pricing_power": "High (Wagon major)",
-                "catalyst_relevance": "Freight wagons, passenger coaches, high-speed bogies"
-            },
-            {
-                "symbol": "TEXRAIL.NS",
-                "name": "Texmaco Rail & Engineering",
-                "role": "Railway wagons, steel castings, and track EPC",
-                "pricing_power": "Medium",
-                "catalyst_relevance": "Freight wagons, track electrification, signals"
-            },
-            {
-                "symbol": "RAMKRISHN.NS",
-                "name": "Ramkrishna Forgings",
-                "role": "Railway wheelsets, axles, and heavy forged components",
-                "pricing_power": "High (Global forging exporter)",
-                "catalyst_relevance": "Wheel and axle assemblies, structural forgings"
-            },
-            {
-                "symbol": "RVNL.NS",
-                "name": "Rail Vikas Nagar",
-                "role": "Railway infrastructure project execution and line doubling",
-                "pricing_power": "Medium (EPC execution)",
-                "catalyst_relevance": "Infrastructure, track laying, new lines"
-            },
-            {
-                "symbol": "IRCON.NS",
-                "name": "IRCON International",
-                "role": "Specialized railway tunnels, bridges, and international rail EPC",
-                "pricing_power": "Medium (PSU builder)",
-                "catalyst_relevance": "Bridges, tunnels, railway electrification"
-            }
-        ]
-    },
-    "RENEWABLE_ENERGY": {
-        "description": "Solar power expansion, wind energy projects, grid transmission, green hydrogen",
-        "suppliers": [
-            {
-                "symbol": "BORORENEW.NS",
-                "name": "Borosil Renewables",
-                "role": "Solar tempered glass manufacturing",
-                "pricing_power": "High (Sole domestic solar glass manufacturer)",
-                "catalyst_relevance": "Solar glass modules, photovoltaic cell covers"
-            },
-            {
-                "symbol": "SUZLON.NS",
-                "name": "Suzlon Energy",
-                "role": "Wind turbine generators and wind farm construction",
-                "pricing_power": "High (Wind turbine major)",
-                "catalyst_relevance": "Wind turbines, wind farm capacity additions"
-            },
-            {
-                "symbol": "KPIGREEN.NS",
-                "name": "KPI Green Energy",
-                "role": "Solar power developer and IPP (Independent Power Producer)",
-                "pricing_power": "Medium",
-                "catalyst_relevance": "Solar power capacity, captive solar parks"
-            },
-            {
-                "symbol": "GEPIL.NS",
-                "name": "GE Power India",
-                "role": "Thermal and renewable grid transmission, boilers, and transformers",
-                "pricing_power": "High (Utility engineering)",
-                "catalyst_relevance": "Power transmission, grid substation transformers"
-            }
-        ]
-    },
-    "SEMICONDUCTORS": {
-        "description": "Semiconductor manufacturing, silicon wafers, testing, and packaging (OSAT)",
-        "suppliers": [
-            {
-                "symbol": "CGPOWER.NS",
-                "name": "CG Power and Industrial Solutions",
-                "role": "Joint-venture OSAT assembly and testing plant",
-                "pricing_power": "High (Early mover OSAT)",
-                "catalyst_relevance": "OSAT, chip packaging and testing facilities"
-            },
-            {
-                "symbol": "KAYNES.NS",
-                "name": "Kaynes Technology",
-                "role": "Electronic Manufacturing Services (EMS) and semiconductor OSAT packaging",
-                "pricing_power": "High (EMS leader)",
-                "catalyst_relevance": "OSAT facility setup, electronic board sub-assembly"
-            },
-            {
-                "symbol": "LINDEINDIA.NS",
-                "name": "Linde India",
-                "role": "Specialty ultra-pure gases (argon, helium, nitrogen) for cleanrooms",
-                "pricing_power": "High (Industrial gases monopoly)",
-                "catalyst_relevance": "Silicon wafer cleaning, semiconductor process gases"
-            }
-        ]
-    }
-}
-
 class ThematicCatalystAnalyzer:
     """
     Analyzes policy documents / budget updates (Catalyst Ingestion),
@@ -179,6 +23,188 @@ class ThematicCatalystAnalyzer:
     """
     def __init__(self, redis_pipeline: RedisPipeline):
         self.redis_pipeline = redis_pipeline
+        
+        # Locate local data_store directory for the knowledge graph file
+        services_dir = os.path.dirname(os.path.abspath(__file__))
+        backend_dir = os.path.dirname(services_dir)
+        self.graph_path = os.path.abspath(os.path.join(backend_dir, "data_store", "thematic_knowledge_graph.json"))
+        self.knowledge_graph = self._load_knowledge_graph()
+
+    def _load_knowledge_graph(self) -> Dict[str, Any]:
+        """Loads the thematic knowledge graph from the local JSON database file."""
+        if os.path.exists(self.graph_path):
+            try:
+                with open(self.graph_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to read knowledge graph JSON at {self.graph_path}: {e}")
+                
+        # Fallback default knowledge graph
+        default_graph = {
+            "DEFENSE": {
+                "description": "Defense acquisition, military upgrades, and indigenization",
+                "suppliers": [
+                    {
+                        "symbol": "SOLARINDS.NS",
+                        "name": "Solar Industries India",
+                        "role": "Propellants and High-Energy Explosives supplier for missiles/rockets",
+                        "pricing_power": "High (Monopoly/Duopoly)",
+                        "catalyst_relevance": "Procurement of missiles, ammunition, and explosives"
+                    },
+                    {
+                        "symbol": "PREMEXPLOS.NS",
+                        "name": "Premier Explosives",
+                        "role": "Solid Propellants and missile explosive material supplier",
+                        "pricing_power": "High (Specialized monopoly)",
+                        "catalyst_relevance": "Solid rocket motors, propellants"
+                    },
+                    {
+                        "symbol": "MIDHANI.NS",
+                        "name": "Mishra Dhatu Nigam",
+                        "role": "Specialty steel, titanium alloys, and superalloys",
+                        "pricing_power": "High (Strategic PSU monopoly)",
+                        "catalyst_relevance": "Armor plates, missile casings, fighter jets, submarines"
+                    },
+                    {
+                        "symbol": "BEL.NS",
+                        "name": "Bharat Electronics",
+                        "role": "Military radar, sonar, and avionics communication systems",
+                        "pricing_power": "High (Defense electronics giant)",
+                        "catalyst_relevance": "Electronics, systems integration, avionics"
+                    },
+                    {
+                        "symbol": "HAL.NS",
+                        "name": "Hindustan Aeronautics",
+                        "role": "Fighter jets, helicopters, gas turbines, and structural aerospace components",
+                        "pricing_power": "High (National aerospace monopoly)",
+                        "catalyst_relevance": "Combat aircraft, helicopters, aerospace indigenization"
+                    },
+                    {
+                        "symbol": "MAZDOCK.NS",
+                        "name": "Mazagon Dock Shipbuilders",
+                        "role": "Submarines, destroyers, and naval warships",
+                        "pricing_power": "High (Naval PSU monopoly)",
+                        "catalyst_relevance": "Warships, submarines, naval defense acquisition"
+                    },
+                    {
+                        "symbol": "BEML.NS",
+                        "name": "BEML Limited",
+                        "role": "Heavy military trucks, missile launchers, and bulldozers",
+                        "pricing_power": "High (Specialized defense PSU supplier)",
+                        "catalyst_relevance": "Missile launchers, military transports, heavy ground systems"
+                    }
+                ]
+            },
+            "RAILWAYS": {
+                "description": "Railway modernization, high-speed rail, wagon procurement, and metro lines",
+                "suppliers": [
+                    {
+                        "symbol": "TITAGARH.NS",
+                        "name": "Titagarh Rail Systems",
+                        "role": "Railway wagons, passenger coaches, and metro trainsets",
+                        "pricing_power": "High (Wagon major)",
+                        "catalyst_relevance": "Freight wagons, passenger coaches, high-speed bogies"
+                    },
+                    {
+                        "symbol": "TEXRAIL.NS",
+                        "name": "Texmaco Rail & Engineering",
+                        "role": "Railway wagons, steel castings, and track EPC",
+                        "pricing_power": "Medium",
+                        "catalyst_relevance": "Freight wagons, track electrification, signals"
+                    },
+                    {
+                        "symbol": "RAMKRISHN.NS",
+                        "name": "Ramkrishna Forgings",
+                        "role": "Railway wheelsets, axles, and heavy forged components",
+                        "pricing_power": "High (Global forging exporter)",
+                        "catalyst_relevance": "Wheel and axle assemblies, structural forgings"
+                    },
+                    {
+                        "symbol": "RVNL.NS",
+                        "name": "Rail Vikas Nagar",
+                        "role": "Railway infrastructure project execution and line doubling",
+                        "pricing_power": "Medium (EPC execution)",
+                        "catalyst_relevance": "Infrastructure, track laying, new lines"
+                    },
+                    {
+                        "symbol": "IRCON.NS",
+                        "name": "IRCON International",
+                        "role": "Specialized railway tunnels, bridges, and international rail EPC",
+                        "pricing_power": "Medium (PSU builder)",
+                        "catalyst_relevance": "Bridges, tunnels, railway electrification"
+                    }
+                ]
+            },
+            "RENEWABLE_ENERGY": {
+                "description": "Solar power expansion, wind energy projects, grid transmission, green hydrogen",
+                "suppliers": [
+                    {
+                        "symbol": "BORORENEW.NS",
+                        "name": "Borosil Renewables",
+                        "role": "Solar tempered glass manufacturing",
+                        "pricing_power": "High (Sole domestic solar glass manufacturer)",
+                        "catalyst_relevance": "Solar glass modules, photovoltaic cell covers"
+                    },
+                    {
+                        "symbol": "SUZLON.NS",
+                        "name": "Suzlon Energy",
+                        "role": "Wind turbine generators and wind farm construction",
+                        "pricing_power": "High (Wind turbine major)",
+                        "catalyst_relevance": "Wind turbines, wind farm capacity additions"
+                    },
+                    {
+                        "symbol": "KPIGREEN.NS",
+                        "name": "KPI Green Energy",
+                        "role": "Solar power developer and IPP (Independent Power Producer)",
+                        "pricing_power": "Medium",
+                        "catalyst_relevance": "Solar power capacity, captive solar parks"
+                    },
+                    {
+                        "symbol": "GEPIL.NS",
+                        "name": "GE Power India",
+                        "role": "Thermal and renewable grid transmission, boilers, and transformers",
+                        "pricing_power": "High (Utility engineering)",
+                        "catalyst_relevance": "Power transmission, grid substation transformers"
+                    }
+                ]
+            },
+            "SEMICONDUCTORS": {
+                "description": "Semiconductor manufacturing, silicon wafers, testing, and packaging (OSAT)",
+                "suppliers": [
+                    {
+                        "symbol": "CGPOWER.NS",
+                        "name": "CG Power and Industrial Solutions",
+                        "role": "Joint-venture OSAT assembly and testing plant",
+                        "pricing_power": "High (Early mover OSAT)",
+                        "catalyst_relevance": "OSAT, chip packaging and testing facilities"
+                    },
+                    {
+                        "symbol": "KAYNES.NS",
+                        "name": "Kaynes Technology",
+                        "role": "Electronic Manufacturing Services (EMS) and semiconductor OSAT packaging",
+                        "pricing_power": "High (EMS leader)",
+                        "catalyst_relevance": "OSAT facility setup, electronic board sub-assembly"
+                    },
+                    {
+                        "symbol": "LINDEINDIA.NS",
+                        "name": "Linde India",
+                        "role": "Specialty ultra-pure gases (argon, helium, nitrogen) for cleanrooms",
+                        "pricing_power": "High (Industrial gases monopoly)",
+                        "catalyst_relevance": "Silicon wafer cleaning, semiconductor process gases"
+                    }
+                ]
+            }
+        }
+        
+        try:
+            os.makedirs(os.path.dirname(self.graph_path), exist_ok=True)
+            with open(self.graph_path, 'w', encoding='utf-8') as f:
+                json.dump(default_graph, f, indent=2)
+            logger.info(f"Initialized default knowledge graph database at {self.graph_path}")
+        except Exception as e:
+            logger.error(f"Failed to initialize default knowledge graph file: {e}")
+            
+        return default_graph
 
     async def ingest_and_categorize(self, catalyst_text: str) -> Dict[str, Any]:
         """
@@ -230,7 +256,7 @@ class ThematicCatalystAnalyzer:
         products_materials = ingestion_results.get("products_or_materials", [])
         budget_cr = ingestion_results.get("estimated_budget_cr")
 
-        if theme not in THEMATIC_KNOWLEDGE_GRAPH:
+        if theme not in self.knowledge_graph:
             return {
                 "status": "ignored",
                 "reason": f"No knowledge graph mappings available for sector/theme: {theme}.",
@@ -238,7 +264,7 @@ class ThematicCatalystAnalyzer:
             }
 
         # Stage 2: Knowledge Graph Lookup
-        sector_details = THEMATIC_KNOWLEDGE_GRAPH[theme]
+        sector_details = self.knowledge_graph[theme]
         suppliers = sector_details["suppliers"]
         logger.info("Retrieved %d supply chain suppliers for theme: %s", len(suppliers), theme)
 
