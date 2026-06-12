@@ -1,5 +1,5 @@
 # Use official Python image
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Install system dependencies and curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
