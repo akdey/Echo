@@ -19,6 +19,7 @@ dependencies = [
     "playwright>=1.40.0",
     "llama-cpp-python>=0.2.75",
     "huggingface-hub>=0.23.0",
+    "pandas-ta",
 ]
 
 [tool.uv]

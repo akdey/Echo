@@ -96,9 +96,9 @@ class ScreenerDaemon:
         self.tickers = fetch_nifty500_tickers()
         
         self.compliance.set_surveillance_lists(
-            asm=["ADANIENT"],
+            asm=[],
             gsm=[],
-            t2t=["LICI"]
+            t2t=[]
         )
 
     async def scrape_fii_dii_flows(self) -> Dict[str, Any]:
@@ -261,6 +261,79 @@ class ScreenerDaemon:
         await self.redis_pipeline.cache_indicator(ticker, "bulk_block_deals", [])
         return []
 
+    async def scrape_surveillance_lists(self) -> Dict[str, List[str]]:
+        """
+        Dynamically scrapes the SEBI ASM, GSM, and T2T lists from the official NSE website
+        or third-party trackers to ensure no mock data is used.
+        """
+        asm_list = []
+        gsm_list = []
+        t2t_list = []
+        
+        url = "https://www.nseindia.com/reports/adr-res-surveillance-measure"
+        
+        try:
+            from playwright.async_api import async_playwright
+            logger.info("[Screener Daemon] Scraping NSE surveillance lists (ASM/GSM/T2T)...")
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800}
+                )
+                page = await context.new_page()
+                
+                # Visit main page to set cookies
+                await page.goto("https://www.nseindia.com/", wait_until="networkidle", timeout=20000)
+                await asyncio.sleep(2)
+                
+                # Navigate to the surveillance reports page
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                await asyncio.sleep(3)
+                
+                # Wait for table to render
+                await page.wait_for_selector("table", timeout=10000)
+                
+                # Extract symbols from tables
+                tables = await page.query_selector_all("table")
+                for table in tables:
+                    headers = await table.query_selector_all("th")
+                    header_texts = [await h.inner_text() for h in headers]
+                    
+                    symbol_col_idx = None
+                    for idx, h_text in enumerate(header_texts):
+                        if "symbol" in h_text.lower() or "security" in h_text.lower():
+                            symbol_col_idx = idx
+                            break
+                            
+                    if symbol_col_idx is not None:
+                        rows = await table.query_selector_all("tr")
+                        for row in rows[1:]:
+                            cols = await row.query_selector_all("td")
+                            if len(cols) > symbol_col_idx:
+                                symbol_text = (await cols[symbol_col_idx].inner_text()).strip()
+                                clean_sym = symbol_text.split()[0].upper()
+                                if clean_sym.isalnum():
+                                    full_text = await table.inner_text()
+                                    if "additional surveillance" in full_text.lower() or "asm" in full_text.lower():
+                                        asm_list.append(clean_sym)
+                                    elif "graded surveillance" in full_text.lower() or "gsm" in full_text.lower():
+                                        gsm_list.append(clean_sym)
+                                    else:
+                                        t2t_list.append(clean_sym)
+                                        
+                await browser.close()
+                logger.info("[Screener Daemon] NSE Surveillance Scraper: Scraped %d ASM, %d GSM, %d T2T symbols.", 
+                            len(asm_list), len(gsm_list), len(t2t_list))
+        except Exception as e:
+            logger.error("[Screener Daemon] Failed to dynamically scrape NSE surveillance lists: %s. Defaulting to empty lists.", str(e))
+            
+        return {
+            "asm": list(set(asm_list)),
+            "gsm": list(set(gsm_list)),
+            "t2t": list(set(t2t_list))
+        }
+
     async def execute_daily_screening(self) -> List[Dict[str, Any]]:
         """
         Runs the daily multi-stage screening loop over the ticker list.
@@ -271,6 +344,14 @@ class ScreenerDaemon:
         
         # Scrape global market status
         await self.scrape_fii_dii_flows()
+        
+        # Update surveillance lists dynamically from NSE
+        surv_lists = await self.scrape_surveillance_lists()
+        self.compliance.set_surveillance_lists(
+            asm=surv_lists.get("asm", []),
+            gsm=surv_lists.get("gsm", []),
+            t2t=surv_lists.get("t2t", [])
+        )
         
         # Create a single requests session with rotated headers to share across requests
         session = get_resilient_session()
