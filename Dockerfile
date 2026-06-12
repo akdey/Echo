@@ -19,6 +19,7 @@ ENV KMP_DUPLICATE_LIB_OK=TRUE
 ENV CMAKE_ARGS="-DGGML_CPU=ON"
 ENV CMAKE_BUILD_PARALLEL_LEVEL="1"
 ENV UV_EXTRA_INDEX_URL="https://abetlen.github.io/llama-cpp-python/whl/cpu"
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 # Set up project workspace
 WORKDIR /app

@@ -17,6 +17,10 @@ dependencies = [
     "uvicorn>=0.40.0",
     "yfinance>=1.4.1",
     "playwright>=1.40.0",
-    "llama-cpp-python==0.2.85",
+    "llama-cpp-python>=0.2.75",
     "huggingface-hub>=0.23.0",
 ]
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+extra-index-url = ["https://abetlen.github.io/llama-cpp-python/whl/cpu"]
