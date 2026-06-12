@@ -32,6 +32,29 @@ class TrendEvaluator:
         df["avg_vol_30"] = df["volume"].rolling(window=30).mean()
         df["avg_body_20"] = (df["close"] - df["open"]).abs().rolling(window=20).mean()
         
+        # On-Balance Volume (OBV)
+        df = TrendEvaluator.calculate_obv(df)
+        
+        return df
+
+    @staticmethod
+    def calculate_obv(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Appends On-Balance Volume (OBV) and its 20-day moving average.
+        OBV = OBV_prev + volume (if close > close_prev)
+            = OBV_prev - volume (if close < close_prev)
+            = OBV_prev (if close == close_prev)
+        """
+        if len(df) == 0:
+            df["obv"] = []
+            df["obv_ema20"] = []
+            return df
+            
+        close_diff = df["close"].diff()
+        direction = np.sign(close_diff.fillna(0.0))
+        
+        df["obv"] = (df["volume"] * direction).cumsum()
+        df["obv_ema20"] = df["obv"].ewm(span=20, adjust=False).mean()
         return df
 
     @staticmethod

@@ -11,6 +11,7 @@ from backend.agents.investment_committee import build_committee_graph
 from backend.agents.state import CommitteeState
 from backend.services.redis_pipeline import RedisPipeline
 from backend.services.screener_daemon import ScreenerDaemon
+from backend.services.thematic_engine import ThematicCatalystAnalyzer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -35,6 +36,9 @@ transition_queue = asyncio.Queue()
 
 class TickerRequest(BaseModel):
     ticker: str
+
+class ThematicRequest(BaseModel):
+    catalyst_text: str
 
 @app.on_event("startup")
 async def startup_event():
@@ -116,6 +120,22 @@ async def analyze_ticker(payload: TickerRequest):
         return {"status": "success", "final_state": final_state_dict}
     except Exception as e:
         logger.error("Failed to run committee state graph: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/thematic_analyze")
+async def thematic_analyze(payload: ThematicRequest):
+    """
+    Ingests policy/budget updates, maps them to supply chain,
+    verifies accumulation using OBV, and runs risk filters.
+    """
+    logger.info("Received request for thematic catalyst analysis.")
+    redis_pipeline = RedisPipeline()
+    analyzer = ThematicCatalystAnalyzer(redis_pipeline)
+    try:
+        results = await analyzer.analyze_thematic_chain(payload.catalyst_text)
+        return results
+    except Exception as e:
+        logger.error("Failed to execute thematic analysis: %s", str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stream_pipeline")
