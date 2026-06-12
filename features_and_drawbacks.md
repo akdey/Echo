@@ -112,50 +112,35 @@ Provides local natural language processing capabilities. It runs entirely on the
 
 ---
 
-## 3. Persistent & Self-Updating Thematic Engine
+### 3. Persistent & Self-Updating Thematic Engine
 ### File Architecture
-* **Implementation Files**: [thematic_engine.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/thematic_engine.py), [thematic_db.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/thematic_db.py)
+* **Implementation Files**: [thematic_engine.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/thematic_engine.py), [data_fetcher.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/data_fetcher.py), [supabase_client.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/supabase_client.py), [embeddings.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/embeddings.py)
 
 ### Feature Overview
-Maps top-down policy announcements or corporate contract wins to supply chain suppliers in the Indian market. It evaluates if the stock is being accumulated by institutional capital (On-Balance Volume check) and filters out overextended plays that are nearing distribution.
+Maps top-down policy announcements or budget catalysts to listed Indian suppliers using PostgreSQL pgvector semantic searches. It checks EOD NSE Bhavcopy deliverable volume percentages to identify institutional accumulation and applies retail safety safeguards (liquidity gates and operator circuit warnings) to protect capital.
 
 ### Technical Implementation Details
-* **SQLite Graph Database**: Persists relations in `thematic_knowledge_graph.db` with a structured node-edge schema:
-  - `nodes`: Store `id` (e.g. `"BEL.NS"`, `"DEFENSE"`), `type` (`"COMPANY"`, `"THEME"`), `label`, and `description`.
-  - `edges`: Capture relationships with attributes: `source_id`, `target_id`, `relation_type` (e.g. `"SUPPLIES_SECTOR"`, `"CONTRACT_WIN"`), `weight` (budget value in crores), `pricing_power` (e.g. monopoly/duopoly), `catalyst_relevance`, and `timestamp`.
-  - Enforces `PRAGMA foreign_keys = ON;` and `ON DELETE CASCADE` to guarantee clean relational deletions.
-* **Autonomous RSS News Crawler**: Periodically fetches Google News RSS query streams searching moneycontrol.com and economictimes.indiatimes.com for keywords like `order win` or `secures contract`. Uses Gemma-4 to parse raw headlines into structured JSON entities:
-  ```json
-  {"is_order_win": true, "company_name": "...", "theme": "...", "products_or_materials": [...], "estimated_budget_cr": ...}
-  ```
-* **Company Ticker Resolver**: Cleans raw company names (removing corporate suffixes like "Ltd", "Limited") and matches them against the dynamic Nifty 500 constituents database using token intersection and length ratios. It automatically inserts successful mappings as new graph nodes and edges.
-* **Catalyst Forgetting (TTL)**: Automatically hard-prunes expired short-term catalyst edges to keep the graph relevant:
-  ```sql
-  DELETE FROM edges WHERE relation_type = 'CONTRACT_WIN' AND timestamp < (current_time - 180 days)
-  ```
-* **Data Anomaly Sanitization**: Enforces strict sanity checks:
-  1. Ignores close prices $\le 0$.
-  2. Discards sequences showing sudden price spikes $> 100\%$ day-on-day.
-  3. Audits volume data and logs anomalies if active trading days record 0 volume.
-* **Smart Money Verification**: Calculates On-Balance Volume (OBV) and its 20-day EMA:
-  $$\text{OBV}_t = \text{OBV}_{t-1} + \text{Volume}_t \times \text{sign}(\text{Close}_t - \text{Close}_{t-1})$$
-  Institutional accumulation is confirmed only if $\text{OBV} > \text{OBV\_EMA20}$ and the OBV is rising over a 10-day rolling window.
-* **Catalyst Exhaustion Filter**: Flags a stock as **"Do Not Buy - Catalyst Exhausted"** if it has rallied $\ge 50\%$ in the last 90 trading days. This prevents retail traders from buying at the top of a distribution phase when insiders dump shares.
-* **Contract Impact Ratio**: Computes the percentage impact of the contract win value relative to the company's total market capitalization:
-  $$\text{Impact \%} = \frac{\text{Budget in Crores}}{\text{Market Cap in Crores}} \times 100$$
+* **Supabase pgvector Database**: Replaces static files and SQLite graphs with a PostgreSQL database on Supabase's free tier. It defines tables for `companies`, `daily_bhavcopy` (storing EOD prices and delivery stats), and `surveillance`.
+* **Cosine Similarity Match (pgvector RAG)**: Generates a 384-dimensional dense vector of the catalyst text using a local `all-MiniLM-L6-v2` transformer model (via `sentence-transformers`). Executes a SQL RPC function (`match_companies`) to perform cosine similarity queries:
+  $$\text{Similarity} = 1 - (\text{description\_embedding} \cdot \text{query\_embedding})$$
+  This instantly maps themes to companies whose product lines or materials match the catalyst details, sorted by relevance score.
+* **Daily Bhavcopy Ingestion & Deliverable Volume (The Retail Edge)**: Downloads the official EOD `sec_bhavdata_full_ddmmyyyy.csv` from the NSE archives. It parses prices, volumes, and deliverable shares (`DELIV_QTY`), which are synced to Supabase.
+* **Institutional Buying Signal**: Computes the 20-day average delivery volume percentage. If the latest delivery percentage exceeds $\ge 45\%$ and represents a $\ge 1.3\text{x}$ spike above the 20-day average, the stock is flagged as under active institutional accumulation.
+* **Database Retention Sliding Window**: Enforces a 250-day sliding window on EOD historical rows to stay within Supabase's 500MB free tier capacity while keeping sufficient history for Weinstein Stage 2 breakouts.
+* **Retail safety Guardrails**:
+  1. **Minimum Liquidity Gate**: Automatically excludes any stock where the 20-day average daily turnover is less than ₹5 Crores.
+  2. **Operator Trap Filter**: Flags a stock with `Operator Pump Warning` if it hits upper price circuits for 3 consecutive days while operating cash flow (CFO) is negative.
+  3. **Surveillance watchlists**: Dynamically blocks trading and grays out stock rows if they are registered in the `surveillance` table under Stage 4 GSM/ASM.
 
 ### Drawbacks & Limitations
 #### Technical Drawbacks
-* **Name Resolution Failures**: The company name resolver relies on token overlaps and string similarity. It can fail or misresolve when news articles use informal short names (e.g., "Premier Exp" instead of "Premier Explosives"), creating incorrect edges in the database.
-* **Arbitrary TTL Pruning**: The 180-day expiry for contract wins is static. Long-term multi-year infrastructure or defense contracts, which materially impact earnings for 2-5 years, are pruned at the same rate as small, short-term orders.
+* **Embedding Model Domain Limits**: The local `all-MiniLM-L6-v2` model is a general-purpose model. It lacks deep financial and industrial domain knowledge to recognize complex Indian equity aliases (e.g., matching "Solar" to "Solar Industries" propellants or specialized chemical formulas) without explicitly descriptive company product lines.
+* **Static EOD Update Latency**: The Bhavcopy is published once a day at 7:00 PM IST. The engine has no real-time intra-day awareness of volume surges or block deals until the market has closed and data is processed.
+* **yfinance Dependency on Initial Setup**: While Bhavcopy handles daily increments, registering new companies requires a single yfinance query to scrape business descriptions. If yfinance blocks the server IP, the description remains blank and the company cannot be matched by pgvector.
 
 #### Practical & Market Drawbacks
-* **Relational SQLite Graph Limitations vs. Native Graph DBs**:
-  - The thematic engine uses a standard relational database (`SQLite`) structured with `nodes` and `edges` tables. It executes queries using standard SQL `JOIN` statements.
-  - *No Multi-Hop Capability*: In supply chain arbitrage, the true opportunity often lies in indirect relationships (e.g., government increases defense budget $\to$ buys missiles from Bharat Dynamics $\to$ who buys rocket motors from Premier Explosives $\to$ who buys raw chemical inputs from a smaller chemical manufacturer).
-  - *Join Explosion*: Querying these multi-hop relationships in SQLite requires recursive Common Table Expressions (CTEs) or multiple nested `JOIN` operations. This is computationally expensive, prone to query lockups, and highly complex to write.
-  - *The Native Alternative*: A native graph database (such as Neo4j or Memgraph) uses index-free adjacency. It can traverse deep supply chain paths (5+ hops) in microseconds, allowing the screener to trace the cash injection down to secondary and tertiary suppliers who are often unrecognized by the broader market.
-* **Static Exhaustion Threshold**: The 50% run-up filter in 90 days applies uniformly. It doesn't adjust for high-beta micro-caps (where 50% swings are common) vs. low-beta large-caps (where a 50% rally signals institutional re-rating).
+* **Lagging Volume Signals**: Deliverable volume surges are trailing indicators. In high-beta microcaps, institutional accumulation is often complete by the time EOD reports are compiled, causing retail entries to get trapped near distribution boundaries.
+* **Fixed Circuit Thresholds**: The operator trap filters consecutive upper circuits uniformly. In volatile bull regimes, legitimate small-caps might hit circuits due to massive order wins, resulting in false operator pump warnings that block valid trades.
 
 ---
 

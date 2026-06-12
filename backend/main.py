@@ -12,14 +12,19 @@ from backend.agents.state import CommitteeState
 from backend.services.redis_pipeline import RedisPipeline
 from backend.services.screener_daemon import ScreenerDaemon
 from backend.services.thematic_engine import ThematicCatalystAnalyzer
-from backend.services.thematic_db import (
-    init_db,
-    add_node_async,
-    delete_node_async,
-    add_edge_async,
-    delete_edge_async,
-    get_graph_data_async
+from backend.services.data_fetcher import DataFetcher, InsiderDisclosureCrawler
+from backend.services.embeddings import generate_embedding
+from backend.services.conviction_engine import run_conviction_scoring
+from backend.services.sector_momentum_service import calculate_sector_momentum
+from backend.services.alert_dispatcher import dispatch_conviction_alerts
+from backend.services.supabase_client import (
+    query_supabase,
+    upsert_supabase,
+    delete_supabase,
+    verify_supabase_connection,
+    IS_SUPABASE_CONFIGURED
 )
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,14 +69,41 @@ class EdgeModel(BaseModel):
     catalyst_relevance: Optional[str] = None
     timestamp: Optional[int] = None
 
+class TradeJournalEntry(BaseModel):
+    symbol: str
+    entry_date: str                     # ISO date string "YYYY-MM-DD"
+    entry_price: float
+    quantity: int
+    conviction_score: int               # 0-100
+    catalyst: Optional[str] = None
+    stop_loss: float
+    target_price: Optional[float] = None
+
+class TradeJournalExit(BaseModel):
+    trade_id: str                       # UUID from trade_journal
+    exit_date: str
+    exit_price: float
+    outcome_notes: Optional[str] = None
+
+class ConvictionRunRequest(BaseModel):
+    symbols: Optional[List[str]] = None  # None = run over all companies
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Initializes cached items on startup."""
+    """Initializes cached items and database connections on startup."""
     logger.info("Initializing system cache and database checks...")
     
-    # Initialize the SQLite Graph database
-    init_db()
-    
+    # Verify Supabase connection
+    if IS_SUPABASE_CONFIGURED:
+        conn_ok = await verify_supabase_connection()
+        if conn_ok:
+            logger.info("Supabase PostgreSQL database connection verified successfully.")
+        else:
+            logger.warning("Supabase PostgreSQL connection failed. Check credentials.")
+    else:
+        logger.warning("Supabase credentials are not configured in environment.")
+
     redis_pipeline = RedisPipeline()
     await redis_pipeline.connect()
     
@@ -127,11 +159,9 @@ async def analyze_ticker(payload: TickerRequest):
     try:
         final_state_dict = {}
         async for output in graph.astream(initial_state):
-            # output contains a dict of {node_name: state_updates}
             node_name = list(output.keys())[0]
             updates = output[node_name]
             
-            # Format update message
             update_msg = {
                 "node": node_name,
                 "status": f"Node '{node_name}' finished execution.",
@@ -141,9 +171,8 @@ async def analyze_ticker(payload: TickerRequest):
             await transition_queue.put(update_msg)
             logger.info("Streamed node update: %s", node_name)
             
-            # Keep track of cumulative updates
             final_state_dict.update(updates)
-            await asyncio.sleep(0.5)  # Slight throttle to let UI animations play smoothly
+            await asyncio.sleep(0.5)
             
         return {"status": "success", "final_state": final_state_dict}
     except Exception as e:
@@ -153,8 +182,9 @@ async def analyze_ticker(payload: TickerRequest):
 @app.post("/api/thematic_analyze")
 async def thematic_analyze(payload: ThematicRequest):
     """
-    Ingests policy/budget updates, maps them to supply chain,
-    verifies accumulation using OBV, and runs risk filters.
+    Ingests policy/budget updates, vectorizes search parameters,
+    performs pgvector semantic search to find suppliers in Supabase,
+    and runs retail safety checks.
     """
     logger.info("Received request for thematic catalyst analysis.")
     redis_pipeline = RedisPipeline()
@@ -168,88 +198,69 @@ async def thematic_analyze(payload: ThematicRequest):
 
 @app.get("/api/thematic/graph")
 async def get_thematic_graph():
-    """Retrieves the full SQLite knowledge graph (nodes and edges)."""
+    """Retrieves all registered company profiles from Supabase."""
     try:
-        data = await get_graph_data_async()
+        data = await query_supabase("companies", {"select": "symbol,name,sector,industry,market_cap_cr,description"})
         return {"status": "success", "data": data}
     except Exception as e:
-        logger.error("Failed to retrieve thematic graph: %s", str(e))
+        logger.error("Failed to retrieve companies list: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/thematic/node")
 async def add_thematic_node(payload: NodeModel):
-    """Creates or updates a node in the SQLite graph database."""
+    """Creates or updates a company profile (with embedding) in Supabase."""
     try:
-        success = await add_node_async(payload.id, payload.type, payload.label, payload.description)
-        if success:
-            return {"status": "success", "message": f"Node '{payload.id}' added/updated."}
-        raise HTTPException(status_code=500, detail="Failed to add node.")
+        emb = generate_embedding(payload.description or "")
+        row = {
+            "symbol": payload.id.upper(),
+            "name": payload.label,
+            "description": payload.description or "No description available.",
+            "description_embedding": emb,
+            "sector": "N/A",
+            "industry": "N/A"
+        }
+        await upsert_supabase("companies", [row])
+        return {"status": "success", "message": f"Company profile '{payload.id}' added/updated."}
     except Exception as e:
-        logger.error("Failed to add node: %s", str(e))
+        logger.error("Failed to add company profile: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/thematic/node/{node_id}")
 async def delete_thematic_node(node_id: str):
-    """Deletes a node from the SQLite graph database (cascades to edges)."""
+    """Deletes a company profile from Supabase."""
     try:
-        success = await delete_node_async(node_id)
-        if success:
-            return {"status": "success", "message": f"Node '{node_id}' and its connected edges deleted."}
-        raise HTTPException(status_code=500, detail=f"Failed to delete node '{node_id}'.")
+        await delete_supabase("companies", {"symbol": f"eq.{node_id.upper()}"})
+        return {"status": "success", "message": f"Company '{node_id}' deleted."}
     except Exception as e:
-        logger.error("Failed to delete node: %s", str(e))
+        logger.error("Failed to delete company: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/thematic/edge")
 async def add_thematic_edge(payload: EdgeModel):
-    """Creates or updates an edge in the SQLite graph database."""
-    try:
-        success = await add_edge_async(
-            payload.source_id,
-            payload.target_id,
-            payload.relation_type,
-            payload.weight,
-            payload.role,
-            payload.pricing_power,
-            payload.catalyst_relevance,
-            payload.timestamp
-        )
-        if success:
-            return {"status": "success", "message": f"Edge '{payload.source_id} -> {payload.target_id}' added/updated."}
-        raise HTTPException(status_code=500, detail="Failed to add edge.")
-    except Exception as e:
-        logger.error("Failed to add edge: %s", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+    """Deprecated: Thematic relationships are now dynamically computed via pgvector."""
+    return {"status": "deprecated", "message": "Thematic relationships are now dynamically computed via pgvector RAG matches."}
 
 @app.delete("/api/thematic/edge/{edge_id}")
 async def delete_thematic_edge(edge_id: int):
-    """Deletes a specific edge from the SQLite graph database."""
-    try:
-        success = await delete_edge_async(edge_id)
-        if success:
-            return {"status": "success", "message": f"Edge '{edge_id}' deleted."}
-        raise HTTPException(status_code=500, detail=f"Failed to delete edge '{edge_id}'.")
-    except Exception as e:
-        logger.error("Failed to delete edge: %s", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+    """Deprecated: Thematic relationships are now dynamically computed via pgvector."""
+    return {"status": "deprecated", "message": "Thematic relationships are now dynamically computed via pgvector RAG matches."}
 
 @app.post("/api/thematic/crawl")
 async def trigger_thematic_crawl():
-    """Manually triggers the news/announcement crawler to find new corporate contract wins."""
+    """Manually triggers the daily NSE Bhavcopy crawl and Supabase ingestion."""
     redis_pipeline = RedisPipeline()
-    analyzer = ThematicCatalystAnalyzer(redis_pipeline)
+    fetcher = DataFetcher(redis_pipeline)
     try:
-        results = await analyzer.crawl_and_extract_news_catalysts()
+        results = await fetcher.ingest_latest_bhavcopy()
         return results
     except Exception as e:
-        logger.error("Failed to execute news crawl: %s", str(e), exc_info=True)
+        logger.error("Failed to execute Bhavcopy ingest: %s", str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stream_pipeline")
 async def stream_pipeline():
     """
-    Exposes a Server-Sent Events (SSE) stream containing real-time agent execution transitions
-    and thought logs.
+    Exposes a Server-Sent Events (SSE) stream containing real-time agent execution transitions.
     """
     async def event_generator():
         while True:
@@ -265,6 +276,303 @@ async def stream_pipeline():
                 break
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 12 — Conviction Matrix, Sector Heatmap, Insider Feed, Trade Journal
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Conviction Matrix ──────────────────────────────────────────────────────────
+
+@app.post("/api/conviction/run")
+async def run_conviction_matrix(payload: ConvictionRunRequest):
+    """
+    Triggers a full (or partial) nightly conviction scoring run.
+    Scores each stock 0-100 across 5 data layers, upserts to Supabase,
+    and dispatches Telegram/email alerts for any score >= threshold.
+
+    Pass `symbols: ["RELIANCE.NS", "TCS.NS"]` to score a subset only.
+    Pass no body to score ALL companies in the Supabase `companies` table.
+    """
+    if not IS_SUPABASE_CONFIGURED:
+        raise HTTPException(status_code=503, detail="Supabase not configured.")
+    try:
+        logger.info("[API] Starting conviction scoring run...")
+
+        # Pull current surveillance list from Supabase for trap detection
+        surv_rows = await query_supabase("surveillance", {"select": "symbol"})
+        surv_set  = {r["symbol"].replace(".NS", "").replace(".BO", "") for r in surv_rows}
+
+        scored = await run_conviction_scoring(
+            symbols=payload.symbols,
+            surveillance_symbols=surv_set,
+        )
+        alert_result = await dispatch_conviction_alerts(scored)
+
+        return {
+            "status": "success",
+            "scored_count": len(scored),
+            "top_10": scored[:10],
+            "alert_result": alert_result,
+        }
+    except Exception as e:
+        logger.error("[API] Conviction run failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/conviction")
+async def get_conviction_list(min_score: int = 0, limit: int = 50):
+    """
+    Returns the latest cached conviction scores from Supabase,
+    sorted descending by conviction_score.
+
+    Query params:
+      - min_score (int): filter to scores >= this value (default 0)
+      - limit (int): number of records to return (default 50, max 200)
+    """
+    limit = min(limit, 200)
+    try:
+        rows = await query_supabase("conviction_matrix", {
+            "select": "*",
+            "conviction_score": f"gte.{min_score}",
+            "order": "conviction_score.desc",
+            "limit": str(limit),
+        })
+        return {"status": "success", "count": len(rows), "results": rows}
+    except Exception as e:
+        logger.error("[API] Failed to fetch conviction list: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Sector Rotation Heatmap ───────────────────────────────────────────────────
+
+@app.post("/api/sectors/refresh")
+async def refresh_sector_momentum():
+    """
+    Fetches fresh Nifty sectoral index data from yfinance,
+    computes relative strength vs Nifty 50, and upserts to Supabase.
+    Returns the full sorted heatmap payload.
+    """
+    try:
+        result = await calculate_sector_momentum()
+        return {"status": "success", "sectors": result}
+    except Exception as e:
+        logger.error("[API] Sector momentum refresh failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sectors")
+async def get_sector_heatmap():
+    """
+    Returns the cached sector momentum heatmap from Supabase.
+    Each record contains: sector_name, rs_score, rs_change_4w, momentum_regime.
+    """
+    try:
+        rows = await query_supabase("sector_momentum", {
+            "select": "*",
+            "order": "rs_score.desc",
+        })
+        # Sort locally by regime order: LEAD, IMPROVE, WEAKEN, LAG
+        regime_order = {"LEAD": 0, "IMPROVE": 1, "WEAKEN": 2, "LAG": 3}
+        rows.sort(key=lambda r: regime_order.get(r.get("momentum_regime", "LAG"), 4))
+        return {"status": "success", "sectors": rows}
+    except Exception as e:
+        logger.error("[API] Failed to fetch sector heatmap: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── NSE Insider / Promoter Disclosure Feed ─────────────────────────────────────
+
+@app.post("/api/insiders/crawl")
+async def crawl_insider_disclosures():
+    """
+    Manually triggers the NSE SASTI insider disclosure crawler.
+    Scans the last 7 days of NSE archives and upserts new filings.
+    """
+    try:
+        crawler = InsiderDisclosureCrawler()
+        result = await crawler.crawl_latest()
+        return result
+    except Exception as e:
+        logger.error("[API] Insider crawl failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/insiders")
+async def get_insider_disclosures(symbol: Optional[str] = None, limit: int = 100):
+    """
+    Returns insider/promoter trading disclosures.
+
+    Query params:
+      - symbol (str): filter by stock symbol e.g. "RELIANCE.NS" (optional)
+      - limit (int): max records (default 100, max 500)
+    """
+    limit = min(limit, 500)
+    params: Dict[str, Any] = {
+        "select": "*",
+        "order": "trade_date.desc",
+        "limit": str(limit),
+    }
+    if symbol:
+        params["symbol"] = f"eq.{symbol.upper()}"
+    try:
+        rows = await query_supabase("insider_disclosures", params)
+        return {"status": "success", "count": len(rows), "disclosures": rows}
+    except Exception as e:
+        logger.error("[API] Failed to fetch insider disclosures: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Private Trade Journal ─────────────────────────────────────────────────────
+
+@app.get("/api/journal")
+async def get_journal(symbol: Optional[str] = None):
+    """
+    Returns all private trade journal entries, newest first.
+    Optionally filtered to a single symbol.
+    """
+    params: Dict[str, Any] = {
+        "select": "*",
+        "order": "entry_date.desc",
+        "limit": "500",
+    }
+    if symbol:
+        params["symbol"] = f"eq.{symbol.upper()}"
+    try:
+        rows = await query_supabase("trade_journal", params)
+        return {"status": "success", "count": len(rows), "entries": rows}
+    except Exception as e:
+        logger.error("[API] Failed to fetch trade journal: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/journal")
+async def log_trade_entry(payload: TradeJournalEntry):
+    """
+    Logs a new trade entry in the private trade journal.
+    Requires a stop-loss — no stop, no trade.
+    """
+    symbol = payload.symbol.upper()
+    if not symbol.endswith((".NS", ".BO")):
+        symbol += ".NS"
+
+    if payload.stop_loss >= payload.entry_price:
+        raise HTTPException(
+            status_code=400,
+            detail="Stop-loss must be below entry price for long positions."
+        )
+    if not (0 <= payload.conviction_score <= 100):
+        raise HTTPException(status_code=400, detail="conviction_score must be 0-100.")
+
+    row = {
+        "symbol":          symbol,
+        "entry_date":      payload.entry_date,
+        "entry_price":     payload.entry_price,
+        "quantity":        payload.quantity,
+        "conviction_score": payload.conviction_score,
+        "catalyst":        payload.catalyst,
+        "stop_loss":       payload.stop_loss,
+        "target_price":    payload.target_price,
+    }
+    try:
+        result = await upsert_supabase("trade_journal", [row])
+        return {"status": "success", "entry": result}
+    except Exception as e:
+        logger.error("[API] Failed to log trade entry: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/journal/exit")
+async def log_trade_exit(payload: TradeJournalExit):
+    """
+    Records the exit price and outcome for an existing trade entry.
+    Computes P&L automatically from the entry price stored in Supabase.
+    """
+    try:
+        existing = await query_supabase("trade_journal", {
+            "id": f"eq.{payload.trade_id}",
+            "select": "entry_price,quantity",
+        })
+        if not existing:
+            raise HTTPException(status_code=404, detail="Trade journal entry not found.")
+
+        entry_price = float(existing[0]["entry_price"])
+        quantity    = int(existing[0]["quantity"])
+        pnl         = round((payload.exit_price - entry_price) * quantity, 2)
+
+        update_row = {
+            "id":            payload.trade_id,
+            "exit_date":     payload.exit_date,
+            "exit_price":    payload.exit_price,
+            "pnl":           pnl,
+            "outcome_notes": payload.outcome_notes,
+            "updated_at":    __import__("datetime").datetime.utcnow().isoformat(),
+        }
+        result = await upsert_supabase("trade_journal", [update_row])
+        return {"status": "success", "pnl": pnl, "entry": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("[API] Failed to log trade exit: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/journal/{trade_id}")
+async def delete_journal_entry(trade_id: str):
+    """Permanently deletes a trade journal entry."""
+    try:
+        await delete_supabase("trade_journal", {"id": f"eq.{trade_id}"})
+        return {"status": "success", "message": f"Trade {trade_id} deleted."}
+    except Exception as e:
+        logger.error("[API] Failed to delete journal entry: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Nightly Full-Stack Job ────────────────────────────────────────────────────
+
+@app.post("/api/jobs/nightly")
+async def trigger_nightly_job():
+    """
+    Convenience endpoint that chains the full nightly pipeline in order:
+      1. Bhavcopy ingest (EOD prices + delivery volume)
+      2. Insider disclosures crawl (NSE SASTI)
+      3. Sector momentum refresh (Nifty sectoral RS)
+      4. Conviction matrix scoring + alert dispatch
+
+    Designed to be called by a free Hugging Face cron Space or cron-job.org
+    at ~8:30 PM IST on market days.
+    """
+    results: Dict[str, Any] = {}
+
+    try:
+        redis = RedisPipeline()
+        fetcher = DataFetcher(redis)
+        results["bhavcopy"] = await fetcher.ingest_latest_bhavcopy()
+    except Exception as e:
+        results["bhavcopy"] = {"status": "error", "detail": str(e)}
+
+    try:
+        crawler = InsiderDisclosureCrawler()
+        results["insider_crawl"] = await crawler.crawl_latest()
+    except Exception as e:
+        results["insider_crawl"] = {"status": "error", "detail": str(e)}
+
+    try:
+        results["sector_momentum"] = {"status": "success", "sectors": len(await calculate_sector_momentum())}
+    except Exception as e:
+        results["sector_momentum"] = {"status": "error", "detail": str(e)}
+
+    try:
+        surv_rows = await query_supabase("surveillance", {"select": "symbol"})
+        surv_set  = {r["symbol"].replace(".NS", "").replace(".BO", "") for r in surv_rows}
+        scored    = await run_conviction_scoring(surveillance_symbols=surv_set)
+        results["conviction"] = await dispatch_conviction_alerts(scored)
+        results["conviction"]["scored_count"] = len(scored)
+    except Exception as e:
+        results["conviction"] = {"status": "error", "detail": str(e)}
+
+    return {"status": "success", "pipeline_results": results}
+
 
 if __name__ == "__main__":
     import uvicorn

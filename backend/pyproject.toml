@@ -1,25 +1,33 @@
 [project]
 name = "backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "Echo — Retail Equity Intelligence Platform for Indian Markets"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "chromadb>=1.5.9",
+    # ── Web framework ──────────────────────────────────────────────
     "fastapi>=0.136.3",
-    "langgraph>=1.2.4",
-    "openbb>=4.7.2",
+    "uvicorn>=0.40.0",
     "pydantic>=2.13.4",
-    "redis>=8.0.0",
+    # ── HTTP / Scraping ────────────────────────────────────────────
+    # curl-cffi impersonates Chrome TLS fingerprint to bypass Cloudflare/NSE WAF.
+    # Falls back to standard `requests` if not available.
+    "curl-cffi>=0.7.0",
+    "requests>=2.32.0",
+    # ── Data / Quant ───────────────────────────────────────────────
+    "yfinance>=1.4.1",
+    "pandas-ta",
+    # ── ML / Embeddings ────────────────────────────────────────────
     "sentence-transformers>=5.5.1",
     "torch>=2.12.0",
     "transformers>=5.11.0",
-    "uvicorn>=0.40.0",
-    "yfinance>=1.4.1",
-    "playwright>=1.40.0",
+    # ── LLM (local inference) ──────────────────────────────────────
     "llama-cpp-python>=0.2.75",
     "huggingface-hub>=0.23.0",
-    "pandas-ta",
+    # ── Agents / Graph ─────────────────────────────────────────────
+    "langgraph>=1.2.4",
+    # ── Cache / State ──────────────────────────────────────────────
+    "redis>=8.0.0",
 ]
 
 [tool.uv]
