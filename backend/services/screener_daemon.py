@@ -2,6 +2,9 @@ import asyncio
 import logging
 import random
 import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from datetime import datetime
 from typing import List, Dict, Any
 
@@ -13,191 +16,67 @@ from backend.services.surveillance_compliance import SEBIComplianceGatekeeper
 
 logger = logging.getLogger(__name__)
 
-# Static fallback database of Nifty constituents to shield against yfinance rate limits
-DEFAULT_INFO_BANK = {
-    "RELIANCE.NS": {
-        "longName": "Reliance Industries Limited",
-        "sector": "Energy",
-        "industry": "Oil & Gas Refineries",
-        "currentPrice": 1263.0,
-        "operatingMargins": 0.185,
-        "ebitdaMargins": 0.22,
-        "returnOnAssets": 0.08,
-        "returnOnEquity": 0.155,
-        "debtToEquity": 38.0,
-        "trailingEps": 98.4,
-        "earningsGrowth": 0.12,
-        "heldPercentInstitutions": 0.28
-    },
-    "TCS.NS": {
-        "longName": "Tata Consultancy Services Limited",
-        "sector": "Technology",
-        "industry": "Information Technology Services",
-        "currentPrice": 3950.0,
-        "operatingMargins": 0.245,
-        "ebitdaMargins": 0.27,
-        "returnOnAssets": 0.18,
-        "returnOnEquity": 0.38,
-        "debtToEquity": 5.0,
-        "trailingEps": 124.5,
-        "earningsGrowth": 0.09,
-        "heldPercentInstitutions": 0.16
-    },
-    "HDFCBANK.NS": {
-        "longName": "HDFC Bank Limited",
-        "sector": "Financial Services",
-        "industry": "Banks - Regional",
-        "currentPrice": 1420.0,
-        "operatingMargins": 0.32,
-        "ebitdaMargins": 0.38,
-        "returnOnAssets": 0.02,
-        "returnOnEquity": 0.172,
-        "debtToEquity": 85.0,
-        "trailingEps": 88.2,
-        "earningsGrowth": 0.18,
-        "heldPercentInstitutions": 0.52
-    },
-    "BHARTIARTL.NS": {
-        "longName": "Bharti Airtel Limited",
-        "sector": "Communication Services",
-        "industry": "Telecom Services",
-        "currentPrice": 1380.0,
-        "operatingMargins": 0.21,
-        "ebitdaMargins": 0.48,
-        "returnOnAssets": 0.05,
-        "returnOnEquity": 0.12,
-        "debtToEquity": 120.0,
-        "trailingEps": 32.5,
-        "earningsGrowth": 0.25,
-        "heldPercentInstitutions": 0.22
-    },
-    "ICICIBANK.NS": {
-        "longName": "ICICI Bank Limited",
-        "sector": "Financial Services",
-        "industry": "Banks - Regional",
-        "currentPrice": 1120.0,
-        "operatingMargins": 0.28,
-        "ebitdaMargins": 0.34,
-        "returnOnAssets": 0.021,
-        "returnOnEquity": 0.185,
-        "debtToEquity": 90.0,
-        "trailingEps": 74.2,
-        "earningsGrowth": 0.20,
-        "heldPercentInstitutions": 0.44
-    },
-    "INFY.NS": {
-        "longName": "Infosys Limited",
-        "sector": "Technology",
-        "industry": "Information Technology Services",
-        "currentPrice": 1480.0,
-        "operatingMargins": 0.205,
-        "ebitdaMargins": 0.24,
-        "returnOnAssets": 0.14,
-        "returnOnEquity": 0.31,
-        "debtToEquity": 8.0,
-        "trailingEps": 62.4,
-        "earningsGrowth": 0.06,
-        "heldPercentInstitutions": 0.34
-    },
-    "SBI.NS": {
-        "longName": "State Bank of India",
-        "sector": "Financial Services",
-        "industry": "Banks - Regional",
-        "currentPrice": 820.0,
-        "operatingMargins": 0.22,
-        "ebitdaMargins": 0.28,
-        "returnOnAssets": 0.011,
-        "returnOnEquity": 0.168,
-        "debtToEquity": 140.0,
-        "trailingEps": 82.5,
-        "earningsGrowth": 0.14,
-        "heldPercentInstitutions": 0.12
-    },
-    "ITC.NS": {
-        "longName": "ITC Limited",
-        "sector": "Consumer Defensive",
-        "industry": "Tobacco",
-        "currentPrice": 430.0,
-        "operatingMargins": 0.35,
-        "ebitdaMargins": 0.39,
-        "returnOnAssets": 0.22,
-        "returnOnEquity": 0.29,
-        "debtToEquity": 1.0,
-        "trailingEps": 16.8,
-        "earningsGrowth": 0.08,
-        "heldPercentInstitutions": 0.42
-    },
-    "HINDUNILVR.NS": {
-        "longName": "Hindustan Unilever Limited",
-        "sector": "Consumer Defensive",
-        "industry": "Household & Personal Products",
-        "currentPrice": 2350.0,
-        "operatingMargins": 0.23,
-        "ebitdaMargins": 0.255,
-        "returnOnAssets": 0.19,
-        "returnOnEquity": 0.202,
-        "debtToEquity": 2.0,
-        "trailingEps": 43.8,
-        "earningsGrowth": 0.04,
-        "heldPercentInstitutions": 0.14
-    },
-    "LICI.NS": {
-        "longName": "Life Insurance Corporation of India",
-        "sector": "Financial Services",
-        "industry": "Insurance - Life",
-        "currentPrice": 1050.0,
-        "operatingMargins": 0.05,
-        "ebitdaMargins": 0.06,
-        "returnOnAssets": 0.005,
-        "returnOnEquity": 0.142,
-        "debtToEquity": 0.0,
-        "trailingEps": 65.4,
-        "earningsGrowth": 0.05,
-        "heldPercentInstitutions": 0.08
-    },
-    "TATAMOTORS.NS": {
-        "longName": "Tata Motors Limited",
-        "sector": "Consumer Cyclical",
-        "industry": "Auto Manufacturers",
-        "currentPrice": 960.0,
-        "operatingMargins": 0.082,
-        "ebitdaMargins": 0.138,
-        "returnOnAssets": 0.042,
-        "returnOnEquity": 0.165,
-        "debtToEquity": 110.0,
-        "trailingEps": 54.3,
-        "earningsGrowth": 0.32,
-        "heldPercentInstitutions": 0.18
-    },
-    "ONGC.NS": {
-        "longName": "Oil and Natural Gas Corporation Limited",
-        "sector": "Energy",
-        "industry": "Oil & Gas Exploration & Production",
-        "currentPrice": 268.0,
-        "operatingMargins": 0.18,
-        "ebitdaMargins": 0.24,
-        "returnOnAssets": 0.075,
-        "returnOnEquity": 0.135,
-        "debtToEquity": 45.0,
-        "trailingEps": 34.2,
-        "earningsGrowth": 0.04,
-        "heldPercentInstitutions": 0.15
-    },
-    "ADANIENT.NS": {
-        "longName": "Adani Enterprises Limited",
-        "sector": "Industrials",
-        "industry": "Conglomerates",
-        "currentPrice": 3150.0,
-        "operatingMargins": 0.068,
-        "ebitdaMargins": 0.095,
-        "returnOnAssets": 0.038,
-        "returnOnEquity": 0.098,
-        "debtToEquity": 150.0,
-        "trailingEps": 28.5,
-        "earningsGrowth": 0.42,
-        "heldPercentInstitutions": 0.06
+def get_resilient_session() -> requests.Session:
+    """
+    Creates a customized requests.Session with randomized web headers
+    and automatic retries to prevent connection limits.
+    """
+    session = requests.Session()
+    
+    # List of randomized browser headers
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
+    ]
+    
+    headers = {
+        "User-Agent": random.choice(user_agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
-}
+    session.headers.update(headers)
+    
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    session.mount("http://", HTTPAdapter(max_retries=retries))
+    return session
+
+async def fetch_ticker_info_resiliently(ticker: str, session: requests.Session) -> Dict[str, Any]:
+    """
+    Fetches fundamental metrics from yfinance using exponential backoff retries with randomized jitter.
+    No mock data is returned; if yfinance fails after retries, raises an exception.
+    """
+    import yfinance as yf
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            ticker_obj = yf.Ticker(ticker, session=session)
+            loop = asyncio.get_event_loop()
+            
+            # Run yfinance blocking calls in the executor pool
+            info = await loop.run_in_executor(None, lambda: ticker_obj.info)
+            
+            if info and isinstance(info, dict) and "currentPrice" in info:
+                return info
+            raise ValueError("Empty or invalid info structure returned from yfinance")
+            
+        except Exception as e:
+            logger.warning(
+                "[Screener Daemon] Attempt %d to fetch fundamentals for %s failed. Error: %s",
+                attempt + 1, ticker, str(e)
+            )
+            if attempt < max_retries - 1:
+                # Exponential backoff: sleep 10s on first fail, 30s on second, with randomized jitter
+                sleep_time = (10.0 * (attempt + 1)) + random.uniform(1.0, 5.0)
+                logger.info("[Screener Daemon] Rate limit / connection error. Backing off for %.2f seconds...", sleep_time)
+                await asyncio.sleep(sleep_time)
+            else:
+                raise e
 
 class ScreenerDaemon:
     """
@@ -210,9 +89,12 @@ class ScreenerDaemon:
         self.redis_pipeline = redis_pipeline
         self.data_fetcher = DataFetcher(redis_pipeline)
         self.compliance = SEBIComplianceGatekeeper()
-        self.tickers = list(DEFAULT_INFO_BANK.keys())
+        self.tickers = [
+            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "BHARTIARTL.NS", 
+            "ICICIBANK.NS", "INFY.NS", "SBI.NS", "LICI.NS", "ITC.NS", 
+            "HINDUNILVR.NS", "TATAMOTORS.NS", "ONGC.NS", "ADANIENT.NS"
+        ]
         
-        # Load mock ASM/GSM lists for safety tests
         self.compliance.set_surveillance_lists(
             asm=["ADANIENT"],
             gsm=[],
@@ -277,12 +159,16 @@ class ScreenerDaemon:
         # Scrape global market status
         await self.scrape_fii_dii_flows()
         
+        # Create a single requests session with rotated headers to share across requests
+        session = get_resilient_session()
         screened_candidates = []
         
         for ticker in self.tickers:
             try:
-                # Add delay to avoid rate limit spikes on historical data fetches
-                await asyncio.sleep(0.3)
+                # Delay between tickers with randomized interval (2.0 to 5.0 seconds) to bypass WAF limits
+                sleep_interval = random.uniform(2.0, 5.0)
+                logger.info("Sleeping %.2f seconds before fetching next ticker: %s", sleep_interval, ticker)
+                await asyncio.sleep(sleep_interval)
                 
                 # 1. Fetch price data and sync to Redis
                 success = await self.data_fetcher.fetch_and_cache_ticker(ticker, period="250d", interval="1d")
@@ -307,19 +193,8 @@ class ScreenerDaemon:
                 weinstein = TrendEvaluator.evaluate_weinstein(df)
                 
                 # 4. Fetch ticker info fundamentals (resilient to yfinance rate limit errors)
-                info = None
-                try:
-                    import yfinance as yf
-                    loop = asyncio.get_event_loop()
-                    info = await loop.run_in_executor(None, lambda: yf.Ticker(ticker).info)
-                    
-                    if not info or not isinstance(info, dict) or "currentPrice" not in info:
-                        raise ValueError("yfinance info payload is empty or invalid")
-                except Exception as ex:
-                    logger.warning("[Screener Daemon] yfinance rate-limited/failed for %s. Using cached local benchmark fundamentals. Reason: %s", ticker, str(ex))
-                    info = DEFAULT_INFO_BANK.get(ticker, {}).copy()
-                    # Keep price updated relative to last candle close
-                    info["currentPrice"] = float(df["close"].iloc[-1])
+                # If it fails, raise the exception, skip the ticker, and write NO mock data.
+                info = await fetch_ticker_info_resiliently(ticker, session)
                 
                 # 5. Run Valuation and Moat Models
                 valuation = ValuationEvaluator.calculate_valuation(info)
@@ -379,7 +254,7 @@ class ScreenerDaemon:
                     logger.info("Candidate discovered: %s | Weinstein Stage: %s | timing: %s", ticker, candidate_report["weinstein_stage"], candidate_report["timing_status"])
                     
             except Exception as e:
-                logger.error("Error screening ticker %s: %s", ticker, str(e), exc_info=True)
+                logger.error("Error screening ticker %s: %s. Skipping this candidate.", ticker, str(e))
                 
         # Cache list of screened candidates
         await self.redis_pipeline.cache_indicator("SCREENER", "candidates", screened_candidates)
