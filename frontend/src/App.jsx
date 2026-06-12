@@ -57,7 +57,7 @@ export default function App() {
     moatRating: "Wide Moat (Buffett Approved)",
     intrinsicValue: 1641.90,
     marginOfSafety: 0.23,
-    isUndervalued: False,
+    isUndervalued: false,
     weinsteinStage: "Stage 2 (Markup)",
     weinsteinScore: 0.8,
     canslimScore: 0.8,
