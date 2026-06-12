@@ -127,7 +127,7 @@ export default function App() {
     let tempPrice = price - 60;
     for (let i = 0; i < 30; i++) {
       tempPrice += (upsideProb - 0.48) * 4.0 + (Math.sin(i * 0.4) * 5.0) + (Math.random() - 0.5) * 10;
-      hist.append({
+      hist.push({
         day: `T-${30 - i}`,
         price: parseFloat(tempPrice.toFixed(2)),
         sma_150: parseFloat((tempPrice * 0.96).toFixed(2))
@@ -141,7 +141,7 @@ export default function App() {
     for (let s = 0; s <= steps; s++) {
       const meanOffset = s * (upsideProb - 0.5) * 6.0;
       const dev = Math.sqrt(s + 1) * 12.0;
-      proj.append({
+      proj.push({
         step: `D+${s}`,
         lower95: parseFloat((price + meanOffset - 1.96 * dev).toFixed(2)),
         lower68: parseFloat((price + meanOffset - 1.0 * dev).toFixed(2)),
