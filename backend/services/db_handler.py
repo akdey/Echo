@@ -250,7 +250,7 @@ class NewsSignal(Base):
     conviction_adjustment = Column(Integer, default=0)
     raw_snippet = Column(Text)
     llm_summary = Column(Text)
-    metadata = Column(JSON, default=dict)
+    metadata_dict = Column("metadata", JSON, default=dict)
     processed_at = Column(DateTime, default=datetime.datetime.utcnow)
     
     def to_dict(self):
@@ -269,7 +269,7 @@ class NewsSignal(Base):
             "conviction_adjustment": self.conviction_adjustment,
             "raw_snippet": self.raw_snippet,
             "llm_summary": self.llm_summary,
-            "metadata": self.metadata if isinstance(self.metadata, dict) else {},
+            "metadata": self.metadata_dict if isinstance(self.metadata_dict, dict) else {},
             "processed_at": self.processed_at.isoformat() if self.processed_at else None
         }
 
@@ -323,9 +323,10 @@ def _query_sync(table: str, params: Optional[Dict[str, Any]] = None) -> List[Dic
                 if k in ["select", "order", "limit"]:
                     continue
                 # Map column attribute
-                if not hasattr(model, k):
+                col_name = "metadata_dict" if (k == "metadata" and table == "news_signals") else k
+                if not hasattr(model, col_name):
                     continue
-                attr = getattr(model, k)
+                attr = getattr(model, col_name)
                 if isinstance(v, str):
                     if v.startswith("eq."):
                         query = query.filter(attr == v[3:])
@@ -353,15 +354,17 @@ def _query_sync(table: str, params: Optional[Dict[str, Any]] = None) -> List[Dic
                 order_val = params["order"]
                 if "." in order_val:
                     col, direction = order_val.split(".", 1)
-                    if hasattr(model, col):
-                        attr = getattr(model, col)
+                    col_name = "metadata_dict" if (col == "metadata" and table == "news_signals") else col
+                    if hasattr(model, col_name):
+                        attr = getattr(model, col_name)
                         if direction.lower() == "desc":
                             query = query.order_by(attr.desc())
                         else:
                             query = query.order_by(attr.asc())
                 else:
-                    if hasattr(model, order_val):
-                        query = query.order_by(getattr(model, order_val))
+                    col_name = "metadata_dict" if (order_val == "metadata" and table == "news_signals") else order_val
+                    if hasattr(model, col_name):
+                        query = query.order_by(getattr(model, col_name))
                         
             if "limit" in params:
                 try:
@@ -383,6 +386,9 @@ def _upsert_sync(table: str, payload: List[Dict[str, Any]]) -> List[Dict[str, An
     with SessionLocal() as session:
         try:
             for item in payload:
+                if table == "news_signals" and "metadata" in item:
+                    item = item.copy()
+                    item["metadata_dict"] = item.pop("metadata")
                 existing = None
                 
                 # Check target table primary key / unique target values
@@ -438,9 +444,10 @@ def _delete_sync(table: str, query_params: Dict[str, str]) -> List[Dict[str, Any
         try:
             query = session.query(model)
             for k, v in query_params.items():
-                if not hasattr(model, k):
+                col_name = "metadata_dict" if (k == "metadata" and table == "news_signals") else k
+                if not hasattr(model, col_name):
                     continue
-                attr = getattr(model, k)
+                attr = getattr(model, col_name)
                 if isinstance(v, str):
                     if v.startswith("eq."):
                         query = query.filter(attr == v[3:])
