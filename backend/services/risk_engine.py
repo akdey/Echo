@@ -43,7 +43,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from backend.services.angel_gateway import AngelOneGateway
+from backend.services.angel_data_gateway import AngelDataGateway
 
 from backend.services.scraper_utils import fetch_nse_json, _make_session
 from backend.services.db_handler import (
@@ -86,7 +86,7 @@ class PreMarketSanityCheck:
     """
 
     def __init__(self):
-        self.gateway = AngelOneGateway()
+        self.gateway = AngelDataGateway()
 
     async def check_symbol(
         self,
@@ -125,7 +125,7 @@ class PreMarketSanityCheck:
                 pass
 
         # Retrieve live LTP as today's open price
-        open_price = self.gateway.get_ltp(symbol, fallback_price=prev_close)
+        open_price = self.gateway.get_live_ltp(symbol, fallback_price=prev_close)
 
         if not open_price or not prev_close:
             return {
@@ -794,8 +794,8 @@ async def check_premarket_gap(symbol: str, previous_close: float) -> Dict[str, A
     """
     Checks if a stock's opening gap is above the threshold (LTP - previous_close) / previous_close > 0.03.
     """
-    gateway = AngelOneGateway()
-    ltp = gateway.get_ltp(symbol, fallback_price=previous_close)
+    gateway = AngelDataGateway()
+    ltp = gateway.get_live_ltp(symbol, fallback_price=previous_close)
     if not ltp or previous_close <= 0:
         return {
             "is_vetoed": False,

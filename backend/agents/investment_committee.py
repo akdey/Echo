@@ -19,7 +19,7 @@ from backend.services.order_book import OrderBookAnalyzer
 from backend.services.fundamental_rag import FundamentalInvestigator
 from backend.services.sentiment_analyzer import SentimentAnalyzer
 from backend.services.llm_gateway import query_llm
-from backend.services.angel_gateway import AngelOneGateway
+from backend.services.angel_data_gateway import AngelDataGateway
 from backend.services.risk_engine import check_premarket_gap, get_position_size
 from backend.services.db_handler import query_db, upsert_db
 
@@ -56,6 +56,22 @@ async def get_or_compute_detailed_indicators(ticker: str) -> Dict[str, Any]:
             rename_map = {"trade_date": "trade_date", "open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"}
             df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
             
+        if df.empty or len(df) < 50:
+            logger.info("[Committee] Fetching history for %s from AngelDataGateway dynamically...", ticker)
+            try:
+                gateway = AngelDataGateway()
+                if gateway.is_configured:
+                    from_dt = datetime.datetime.now() - datetime.timedelta(days=180)
+                    from_date = from_dt.strftime("%Y-%m-%d 09:15")
+                    to_date = datetime.datetime.now().strftime("%Y-%m-%d 15:30")
+                    
+                    hist_candles = gateway.get_historical_data(ticker, interval="1d", from_date=from_date, to_date=to_date)
+                    if hist_candles:
+                        df = pd.DataFrame(hist_candles)
+                        df = df.rename(columns={"timestamp": "trade_date"})
+            except Exception as gateway_err:
+                logger.warning("[Committee] AngelDataGateway fetch failed for %s: %s. Falling back to yfinance.", ticker, gateway_err)
+
         if df.empty or len(df) < 50:
             logger.info("[Committee] Fetching yfinance history for %s dynamically...", ticker)
             ticker_obj = yf.Ticker(ticker)
@@ -557,7 +573,7 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
             "entry_date": f"eq.{today_str}"
         })
         if existing_trades:
-            msg = f"[Risk Arbiter] Idempotency Check: Trade already executed today for {state.ticker} on {today_str}. Skipping duplicate order placement."
+            msg = f"[Risk Arbiter] Idempotency Check: Alert already generated today for {state.ticker} on {today_str}. Skipping duplicate alert generation."
             logger.warning(msg)
             return {
                 "wofi_score": wofi,
@@ -570,10 +586,10 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
     except Exception as db_err:
         logger.error("[Risk Arbiter] Database query error for idempotency check: %s", db_err)
 
-    # 2. Get live LTP from AngelOneGateway
-    gateway = AngelOneGateway()
+    # 2. Get live LTP from AngelDataGateway
+    gateway = AngelDataGateway()
     if not gateway.is_configured:
-        msg = "[Risk Arbiter] Angel One Gateway is not configured (missing env variables). Aborting live trade."
+        msg = "[Risk Arbiter] Angel One Gateway is not configured (missing env variables). Aborting manual trade setup."
         logger.error(msg)
         return {
             "execution_status": "trade_aborted",
@@ -581,9 +597,9 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
             "logs": state.logs + [o_log, msg]
         }
 
-    ltp = gateway.get_ltp(state.ticker, fallback_price=state.current_price)
+    ltp = gateway.get_live_ltp(state.ticker, fallback_price=state.current_price)
     if ltp <= 0.0:
-        msg = f"[Risk Arbiter] Invalid LTP ({ltp}) for {state.ticker}. Aborting live trade."
+        msg = f"[Risk Arbiter] Invalid LTP ({ltp}) for {state.ticker}. Aborting manual trade setup."
         logger.error(msg)
         return {
             "execution_status": "trade_aborted",
@@ -592,7 +608,6 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
         }
 
     # 3. Premarket Gap Check Veto
-    # Fetch previous close from detailed_indicators or fallback to current_price
     prev_close = state.current_price
     if state.detailed_indicators and "fundamentals" in state.detailed_indicators:
         prev_close = state.detailed_indicators["fundamentals"].get("previousClose") or prev_close
@@ -624,7 +639,7 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
     shares = int(allocated_inr / ltp) if ltp > 0 else 0
 
     if shares <= 0:
-        msg = f"[Risk Arbiter] Calculated shares is 0 (allocated: ₹{allocated_inr:.2f}, LTP: ₹{ltp:.2f}). Aborting trade."
+        msg = f"[Risk Arbiter] Calculated shares is 0 (allocated: ₹{allocated_inr:.2f}, LTP: ₹{ltp:.2f}). Aborting setup."
         logger.warning(msg)
         return {
             "execution_status": "trade_aborted",
@@ -635,7 +650,7 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
     # Lookup scrip master info for tick_size, tradingsymbol, and token
     symbol_info = gateway.lookup_symbol(state.ticker)
     if not symbol_info:
-        msg = f"[Risk Arbiter] Symbol {state.ticker} not found in Angel One instrument master. Aborting trade."
+        msg = f"[Risk Arbiter] Symbol {state.ticker} not found in Angel One instrument master. Aborting setup."
         logger.error(msg)
         return {
             "execution_status": "trade_aborted",
@@ -648,35 +663,26 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
     limit_price = round(round(raw_limit_price / tick_size) * tick_size, 2)
     stop_loss = round(ltp * 0.95, 2)
 
-    # 5. Place live order on Angel One
+    # 5. Dispatch Action Alert via Telegram
     try:
-        # Check login status
-        if not gateway._login() or not gateway.smart_api:
-            raise ConnectionError("Failed to authenticate session with Angel One API.")
-
-        order_params = {
-            "variety": "NORMAL",
-            "tradingsymbol": symbol_info["tradingsymbol"],
-            "symboltoken": symbol_info["token"],
-            "transactiontype": "BUY",
-            "exchange": symbol_info["exch_seg"],
-            "ordertype": "LIMIT",
-            "producttype": "DELIVERY",
-            "duration": "DAY",
-            "price": str(limit_price),
-            "quantity": str(shares)
-        }
+        alert_msg = (
+            "🔔 *Echo Action Alert: High Conviction Trade Setup* 🔔\n\n"
+            f"• *Ticker*: `{state.ticker}`\n"
+            f"• *Limit Price Limit*: ₹{limit_price:.2f} (LTP: ₹{ltp:.2f})\n"
+            f"• *Stop-Loss*: ₹{stop_loss:.2f}\n"
+            f"• *Target Price (15%)*: ₹{round(ltp * 1.15, 2):.2f}\n"
+            f"• *Suggested Position Size*: ₹{allocated_inr:,.2f} ({allocation:.1%} of capital)\n"
+            f"• *Suggested Quantity*: {shares} shares\n\n"
+            f"_Action Required: Place this trade manually on Groww, Angel One, Axis, or your preferred broker app._"
+        )
         
-        logger.info("[Risk Arbiter] Dispatching normal BUY limit order for %s: qty=%d, price=₹%.2f", state.ticker, shares, limit_price)
-        order_id = gateway.smart_api.placeOrder(order_params)
-        if not order_id:
-            raise ValueError("Angel One API returned an empty order identifier.")
-            
-        e_log = f"[Risk Arbiter] Live BUY Limit Order placed. ID: {order_id} | Qty: {shares} shares @ ₹{limit_price:.2f} (LTP: ₹{ltp:.2f}) | Stop Loss: ₹{stop_loss:.2f}"
+        from backend.services.alert_dispatcher import send_telegram
+        alert_sent = await send_telegram(alert_msg)
+        
+        e_log = f"[Risk Arbiter] Action Alert generated and dispatched via Telegram: {alert_sent} | Qty: {shares} shares @ limit ₹{limit_price:.2f} (LTP: ₹{ltp:.2f})"
         logger.info(e_log)
 
-        # 6. Log trade to database only on successful execution
-        # Compute dynamic conviction score scaled 0-100
+        # 6. Log trade to database with PENDING_MANUAL_EXECUTION status
         conviction_score = int(
             (state.fundamental_score / 5.0 * 0.3 +
              state.weinstein_score * 0.2 +
@@ -694,10 +700,11 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
             "conviction_score": conviction_score,
             "stop_loss": float(stop_loss),
             "target_price": float(round(ltp * 1.15, 2)),
-            "catalyst": f"Real-money limit order placed via Angel One SmartAPI. Order ID: {order_id}"
+            "catalyst": f"Manual action alert generated. Buy range up to ₹{limit_price:.2f} (LTP ₹{ltp:.2f}).",
+            "outcome_notes": "PENDING_MANUAL_EXECUTION"
         }
         await upsert_db("trade_journal", [db_payload])
-        db_log = "[Risk Arbiter] Trade successfully recorded in trade_journal."
+        db_log = "[Risk Arbiter] Trade successfully recorded in trade_journal as PENDING_MANUAL_EXECUTION."
         logger.info(db_log)
 
         return {
@@ -709,8 +716,8 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
             "logs": state.logs + [o_log, gap_msg, e_log, db_log]
         }
 
-    except Exception as broker_err:
-        err_msg = f"[Risk Arbiter] Live execution failed. Broker error: {broker_err}"
+    except Exception as api_err:
+        err_msg = f"[Risk Arbiter] Failed to construct or dispatch Action Alert: {api_err}"
         logger.error(err_msg, exc_info=True)
         return {
             "allocation_percentage": 0.0,

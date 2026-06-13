@@ -1467,6 +1467,8 @@ export default function App() {
                         <td>
                           {row.exit_date ? (
                             <span className="bg-slate-800 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Closed</span>
+                          ) : row.outcome_notes === "PENDING_MANUAL_EXECUTION" ? (
+                            <span className="bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Pending</span>
                           ) : (
                             <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Active</span>
                           )}

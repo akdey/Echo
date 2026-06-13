@@ -14,6 +14,7 @@ from curl_cffi import requests as curl_requests
 from backend.services.redis_pipeline import RedisPipeline
 from backend.services.db_handler import query_db, upsert_db, delete_db, IS_DB_CONFIGURED
 from backend.services.embeddings import generate_embedding
+from backend.services.angel_data_gateway import AngelDataGateway
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +143,31 @@ class DataFetcher:
                         if success:
                             return True
                     else:
-                        logger.info("Insufficient database history for %s (%d records). Falling back to yfinance.", ticker, len(rows) if rows else 0)
+                        logger.info("Insufficient database history for %s (%d records). Falling back.", ticker, len(rows) if rows else 0)
                 except Exception as db_err:
                     logger.warning("Failed to fetch historical candles from database for %s: %s", ticker, db_err)
 
-            # 2. Fallback to yfinance
+            # 2. Try fetching from AngelDataGateway
+            gateway = AngelDataGateway()
+            if gateway.is_configured:
+                try:
+                    days_map = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825, "max": 1825}
+                    days = days_map.get(period, 180)
+                    from_dt = datetime.datetime.now() - datetime.timedelta(days=days)
+                    from_date = from_dt.strftime("%Y-%m-%d 09:15")
+                    to_date = datetime.datetime.now().strftime("%Y-%m-%d 15:30")
+                    
+                    logger.info("Fetching data for %s (period=%s, interval=%s) from AngelDataGateway...", ticker, period, interval)
+                    candles = gateway.get_historical_data(ticker, interval=interval, from_date=from_date, to_date=to_date)
+                    if candles:
+                        success = await self.redis_pipeline.store_ohlcva(ticker, interval, candles)
+                        if success:
+                            logger.info("Successfully fetched and cached %d candles from AngelDataGateway for %s", len(candles), ticker)
+                            return True
+                except Exception as gateway_err:
+                    logger.warning("AngelDataGateway fetch failed for %s: %s. Reverting to yfinance.", ticker, gateway_err)
+
+            # 3. Fallback to yfinance
             max_retries = 3
             df = None
             for attempt in range(max_retries):
