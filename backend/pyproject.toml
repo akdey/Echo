@@ -30,6 +30,8 @@ dependencies = [
     "redis>=8.0.0",
     "psycopg2-binary",
     "sqlalchemy>=2.0.30",
+    # ── Vector DB ──────────────────────────────────────────────────
+    "chromadb",
 ]
 
 [tool.uv]
