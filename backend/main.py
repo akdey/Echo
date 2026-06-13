@@ -32,7 +32,8 @@ from backend.services.supabase_client import (
     upsert_supabase,
     delete_supabase,
     verify_supabase_connection,
-    IS_SUPABASE_CONFIGURED
+    IS_SUPABASE_CONFIGURED,
+    rpc_supabase
 )
 import yfinance as yf
 import pandas as pd
@@ -63,6 +64,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class SlidingQueue(asyncio.Queue):
+    def put_nowait(self, item):
+        if self.full():
+            try:
+                self.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        super().put_nowait(item)
+
+# Global queue to stream logs for SSE
+logs_queue = SlidingQueue(maxsize=500)
+
+class SSELogHandler(logging.Handler):
+    def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+        super().__init__()
+        self.queue = queue
+        self.loop = loop
+
+    def emit(self, record):
+        try:
+            log_entry = self.format(record)
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, log_entry)
+        except Exception:
+            pass
 
 # Global queue to stream state transitions for SSE
 transition_queue = asyncio.Queue()
@@ -112,6 +138,14 @@ class ConvictionRunRequest(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     """Initializes cached items and database connections on startup."""
+    try:
+        loop = asyncio.get_running_loop()
+        handler = SSELogHandler(logs_queue, loop)
+        handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+        logging.getLogger().addHandler(handler)
+    except Exception as e:
+        print(f"Failed to setup SSELogHandler: {e}")
+        
     logger.info("Initializing system cache and database checks...")
     
     # Verify Supabase connection
@@ -1066,6 +1100,19 @@ async def run_symbol_simulation(symbol: str):
     except Exception as e:
         logger.error("[API] Simulation run failed for %s: %s", symbol, e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/operations/logs/stream")
+async def stream_logs():
+    """
+    Server-Sent Events (SSE) endpoint to stream live system logs.
+    """
+    async def log_generator():
+        while True:
+            log_msg = await logs_queue.get()
+            yield f"data: {log_msg}\n\n"
+
+    return StreamingResponse(log_generator(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

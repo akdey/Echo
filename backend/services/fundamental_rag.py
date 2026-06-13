@@ -7,24 +7,20 @@ from backend.services.llm_gateway import query_llm
 
 logger = logging.getLogger(__name__)
 
-class DummyEmbeddingFunction:
-    """A zero-dependency local embedding function to avoid downloading model weights."""
+class RealEmbeddingFunction:
+    """A real local embedding function using sentence-transformers."""
     def __call__(self, input: List[str]) -> List[List[float]]:
         return self.embed_documents(input)
 
     def embed_documents(self, input: List[str]) -> List[List[float]]:
-        embeddings = []
-        for text in input:
-            val = float(len(text) % 100) / 100.0
-            vector = [val] * 384
-            embeddings.append(vector)
-        return embeddings
+        from backend.services.embeddings import generate_embedding
+        return [generate_embedding(text) for text in input]
 
     def embed_query(self, input: List[str]) -> List[List[float]]:
         return self.embed_documents(input)
 
     def name(self) -> str:
-        return "DummyEmbeddingFunction"
+        return "RealEmbeddingFunction"
 
 class FundamentalInvestigator:
     """
@@ -34,8 +30,8 @@ class FundamentalInvestigator:
     def __init__(self, db_path: str = "backend/data_store/chromadb"):
         # Set up a persistent local ChromaDB client
         self.chroma_client = chromadb.PersistentClient(path=db_path)
-        # Use dummy local embedding function to avoid HF model downloads
-        self.embedding_function = DummyEmbeddingFunction()
+        # Use real local embedding function using sentence-transformers
+        self.embedding_function = RealEmbeddingFunction()
         self.collection_name = "forensic_accounting"
         self.collection = self.chroma_client.get_or_create_collection(
             name=self.collection_name,

@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libgomp1 \
     libopenblas-dev \
+    redis-server \
     && rm -rf /var/lib/apt/lists/*
 
 # Set environment variables for compilation stability and wheel configuration
@@ -36,13 +37,11 @@ RUN cd backend && uv sync
 RUN mkdir -p /app/backend/models && \
     /app/backend/.venv/bin/python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='bartowski/google_gemma-4-E4B-it-GGUF', filename='google_gemma-4-E4B-it-Q4_K_M.gguf', local_dir='/app/backend/models')"
 
-# Install Playwright browser binaries and system dependencies
-RUN /app/backend/.venv/bin/playwright install --with-deps chromium
 
 COPY backend/ ./backend/
 
 # Expose default Hugging Face Space port
 EXPOSE 7860
 
-# Start Uvicorn pointing to exposed port
-CMD ["/app/backend/.venv/bin/uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "7860"]
+# Start Redis in background and then start Uvicorn
+CMD ["sh", "-c", "redis-server --daemonize yes && /app/backend/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 7860"]

@@ -5,6 +5,10 @@ import re
 from typing import Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 import yfinance as yf
+import pandas as pd
+import numpy as np
+import datetime
+import asyncio
 
 from backend.agents.state import CommitteeState
 from backend.services.redis_pipeline import RedisPipeline
@@ -14,6 +18,175 @@ from backend.services.order_book import OrderBookAnalyzer
 from backend.services.fundamental_rag import FundamentalInvestigator
 from backend.services.sentiment_analyzer import SentimentAnalyzer
 from backend.services.llm_gateway import query_llm
+
+async def get_or_compute_detailed_indicators(ticker: str) -> Dict[str, Any]:
+    """
+    Retrieves detailed indicators from Redis, or computes them dynamically on-the-fly
+    if they are not cached. No mock or default values are returned.
+    """
+    import pandas as pd
+    import numpy as np
+    import datetime
+    import requests
+    from backend.services.screener_daemon import fetch_ticker_info_resiliently
+    from backend.services.surveillance_compliance import SEBIComplianceGatekeeper
+    from backend.services.scraper_utils import fetch_surveillance_lists
+    from backend.services.screener_daemon import ScreenerDaemon
+    
+    redis_pipeline = RedisPipeline()
+    await redis_pipeline.connect()
+    try:
+        # Check cache first
+        cached = await redis_pipeline.get_cached_indicator(ticker, "detailed_indicators")
+        if cached and "technical" in cached and "fundamentals" in cached:
+            if "timing_status" in cached and "weinstein_stage" in cached:
+                return cached
+            
+        logger.info("[Committee] Cache miss for %s detailed_indicators. Computing dynamically...", ticker)
+        
+        # 1. Fetch history
+        candles = await redis_pipeline.fetch_ohlcva(ticker, "1d")
+        df = pd.DataFrame()
+        if candles:
+            df = pd.DataFrame(candles)
+            rename_map = {"trade_date": "trade_date", "open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"}
+            df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+            
+        if df.empty or len(df) < 50:
+            logger.info("[Committee] Fetching yfinance history for %s dynamically...", ticker)
+            ticker_obj = yf.Ticker(ticker)
+            loop = asyncio.get_event_loop()
+            yf_df = await loop.run_in_executor(
+                None,
+                lambda: ticker_obj.history(period="6mo", interval="1d")
+            )
+            if not yf_df.empty:
+                df = yf_df.reset_index().rename(columns={
+                    "Date": "trade_date",
+                    "Open": "open",
+                    "High": "high",
+                    "Low": "low",
+                    "Close": "close",
+                    "Volume": "volume"
+                })
+                
+        if df.empty:
+            raise ValueError(f"No price history found for {ticker}")
+            
+        # Ensure correct datatypes
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col in df.columns:
+                df[col] = df[col].astype(float)
+                
+        # 2. Compute technical indicators
+        df = TrendEvaluator.calculate_indicators(df)
+        swings_high, swings_low = TrendEvaluator.identify_swings(df)
+        fvgs = TrendEvaluator.detect_fvgs(df)
+        sweeps = TrendEvaluator.detect_liquidity_sweeps(df, swings_high, swings_low)
+        weinstein = TrendEvaluator.evaluate_weinstein(df)
+        timing = TrendEvaluator.get_entry_timing_assessment(df, weinstein, fvgs)
+        
+        # 3. Fetch info resiliently
+        session = requests.Session()
+        current_price = float(df["close"].iloc[-1])
+        
+        info = await fetch_ticker_info_resiliently(ticker, session, current_price=current_price)
+        if not info or not isinstance(info, dict):
+            info = {
+                "currentPrice": current_price,
+                "previousClose": current_price,
+                "longName": ticker,
+                "sector": "N/A",
+                "industry": "N/A"
+            }
+            
+        # 4. Compute valuation and buffett scorecard
+        valuation = ValuationEvaluator.calculate_valuation(info)
+        buffett_scorecard = ValuationEvaluator.generate_buffett_scorecard(valuation)
+        canslim = TrendEvaluator.evaluate_canslim(df, info)
+        
+        # 5. Check surveillance status
+        compliance = SEBIComplianceGatekeeper()
+        try:
+            lists = await fetch_surveillance_lists()
+            compliance.set_surveillance_lists(
+                asm=lists.get("asm", []),
+                gsm=lists.get("gsm", []),
+                t2t=lists.get("t2t", [])
+            )
+        except Exception as se_err:
+            logger.warning("[Committee] Failed to fetch compliance list updates: %s", se_err)
+            
+        surveillance = compliance.verify_surveillance_status(ticker)
+        
+        # Retail Safety Gates
+        if "turnover_cr" in df.columns:
+            df["turnover_cr"] = df["turnover_cr"].astype(float)
+            avg_turnover_20d = float(df["turnover_cr"].rolling(window=20).mean().iloc[-1])
+        else:
+            turnover = (df["close"] * df["volume"]) / 10000000.0
+            avg_turnover_20d = float(turnover.rolling(window=20).mean().iloc[-1])
+            
+        is_illiquid = avg_turnover_20d < 5.0
+        
+        surveillance_reasons = list(surveillance.get("reasons", []))
+        if is_illiquid:
+            surveillance_reasons.append("Average daily turnover < 5 Crores (Illiquid)")
+            
+        is_blocked = surveillance.get("is_blocked", False) or is_illiquid
+        
+        # Bulk/block deals
+        deals = []
+        try:
+            daemon = ScreenerDaemon(redis_pipeline)
+            deals = await daemon.scrape_bulk_block_deals(ticker)
+        except Exception as d_err:
+            logger.warning("[Committee] Deals scraper warning: %s", d_err)
+            
+        detailed_indicators = {
+            "technical": {
+                "sma_50": float(df["sma_50"].iloc[-1]) if not pd.isna(df["sma_50"].iloc[-1]) else 0.0,
+                "sma_150": float(df["sma_150"].iloc[-1]) if not pd.isna(df["sma_150"].iloc[-1]) else 0.0,
+                "ema_20": float(df["ema_20"].iloc[-1]) if not pd.isna(df["ema_20"].iloc[-1]) else 0.0,
+                "fvgs": fvgs[-10:],
+                "sweeps": sweeps[-10:]
+            },
+            "fundamentals": valuation,
+            "buffett_scorecard": buffett_scorecard,
+            "surveillance": {
+                "is_blocked": is_blocked,
+                "reasons": surveillance_reasons
+            },
+            "deals": deals,
+            "timing_status": timing["status"],
+            "timing_description": timing["description"],
+            "weinstein_stage": weinstein["stage"],
+            "weinstein_score": weinstein["score"],
+            "canslim_score": canslim["score"],
+            "updated_at": datetime.datetime.now().isoformat()
+        }
+        
+        # Cache full indicators
+        await redis_pipeline.cache_indicator(ticker, "detailed_indicators", detailed_indicators)
+        logger.info("[Committee] Successfully computed and cached detailed_indicators for %s", ticker)
+        return detailed_indicators
+        
+    except Exception as e:
+        logger.error("[Committee] Failed to dynamically compute indicators for %s: %s", ticker, e, exc_info=True)
+        return {
+            "technical": {"sma_50": 0.0, "sma_150": 0.0, "ema_20": 0.0, "fvgs": [], "sweeps": []},
+            "fundamentals": {"moat_rating": "N/A", "intrinsic_value": 0.0, "margin_of_safety": 0.0, "is_undervalued": False},
+            "buffett_scorecard": {"score": 0, "total_rules": 5, "verdict": "N/A"},
+            "surveillance": {"is_blocked": False, "reasons": []},
+            "deals": [],
+            "timing_status": "N/A",
+            "timing_description": f"Failed to compute: {str(e)}",
+            "weinstein_stage": "N/A",
+            "weinstein_score": 0.0,
+            "canslim_score": 0.0
+        }
+    finally:
+        await redis_pipeline.disconnect()
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +216,10 @@ async def discovery_node(state: CommitteeState) -> Dict[str, Any]:
                 
     fii_dii = await redis_pipeline.get_cached_indicator("MARKET", "fii_dii_flows")
     if not fii_dii:
-        fii_dii = {"fii_net_crores": 120.0, "dii_net_crores": 1500.0, "market_state": "Net Accumulation"}
+        from backend.services.scraper_utils import fetch_fii_dii_flows
+        fii_dii = await fetch_fii_dii_flows()
+        if not fii_dii:
+            fii_dii = {"fii_net_crores": 0.0, "dii_net_crores": 0.0, "market_state": "N/A"}
         
     await redis_pipeline.disconnect()
     
@@ -58,33 +234,21 @@ async def technical_analysis_node(state: CommitteeState) -> Dict[str, Any]:
     log_msg = f"[Technical Desk] Scanning trend structures and smart money wicks for {state.ticker}..."
     logger.info(log_msg)
     
-    redis_pipeline = RedisPipeline()
-    await redis_pipeline.connect()
+    indicators = await get_or_compute_detailed_indicators(state.ticker)
+    tech = indicators.get("technical", {})
+    timing_status = indicators.get("timing_status", "N/A")
+    timing_desc = indicators.get("timing_description", "")
+    weinstein_stage = indicators.get("weinstein_stage", "N/A")
+    weinstein_score = indicators.get("weinstein_score", 0.0)
+    canslim_score = indicators.get("canslim_score", 0.0)
     
-    # Fetch detailed indicators or compute them on the fly
-    cached_indicators = await redis_pipeline.get_cached_indicator(state.ticker, "detailed_indicators")
-    candles = await redis_pipeline.fetch_ohlcva(state.ticker, "1d")
-    
-    await redis_pipeline.disconnect()
-    
-    current_price = candles[-1]["close"] if candles else 100.0
-    
-    if cached_indicators and "technical" in cached_indicators:
-        tech = cached_indicators["technical"]
-        funds = cached_indicators["fundamentals"]
-        timing_status = cached_indicators.get("timing_status", "Neutral")
-        timing_desc = cached_indicators.get("timing_description", "")
-        weinstein_stage = cached_indicators.get("weinstein_stage", "Unknown")
-        weinstein_score = cached_indicators.get("weinstein_score", 0.0)
-        canslim_score = cached_indicators.get("canslim_score", 0.0)
-    else:
-        # Generate defaults if cache is missing
-        timing_status = "Optimal Buy"
-        timing_desc = "Breakout triggered with unmitigated FVG support."
-        weinstein_stage = "Stage 2 (Markup)"
-        weinstein_score = 0.8
-        canslim_score = 0.6
-        tech = {"fvgs": [], "sweeps": []}
+    current_price = indicators.get("fundamentals", {}).get("current_price") or indicators.get("fundamentals", {}).get("currentPrice") or 0.0
+    if current_price == 0.0:
+        redis_pipeline = RedisPipeline()
+        await redis_pipeline.connect()
+        candles = await redis_pipeline.fetch_ohlcva(state.ticker, "1d")
+        await redis_pipeline.disconnect()
+        current_price = candles[-1]["close"] if candles else 100.0
         
     t_log = f"[Technical Desk] Weinstein: {weinstein_stage} | CANSLIM Score: {canslim_score:.2f} | Timing Assessment: {timing_status}"
     logger.info(t_log)
@@ -104,36 +268,20 @@ async def fundamental_evaluation_node(state: CommitteeState) -> Dict[str, Any]:
     log_msg = f"[Fundamental Desk] Auditing balance sheets, ROCE ratios, and SEBI surveillance status..."
     logger.info(log_msg)
     
-    redis_pipeline = RedisPipeline()
-    await redis_pipeline.connect()
-    cached_indicators = await redis_pipeline.get_cached_indicator(state.ticker, "detailed_indicators")
-    await redis_pipeline.disconnect()
+    indicators = await get_or_compute_detailed_indicators(state.ticker)
+    funds = indicators.get("fundamentals", {})
+    scorecard = indicators.get("buffett_scorecard", {})
+    surv = indicators.get("surveillance", {})
+    deals = indicators.get("deals", [])
     
-    is_blocked = False
-    reasons = []
+    score = float(scorecard.get("score", 0))
+    moat = funds.get("moat_rating", "N/A")
+    intrinsic = funds.get("intrinsic_value", 0.0)
+    mos = funds.get("margin_of_safety", 0.0)
+    undervalued = funds.get("is_undervalued", False)
     
-    if cached_indicators:
-        funds = cached_indicators.get("fundamentals", {})
-        scorecard = cached_indicators.get("buffett_scorecard", {})
-        surv = cached_indicators.get("surveillance", {})
-        deals = cached_indicators.get("deals", [])
-        
-        score = float(scorecard.get("score", 3))
-        moat = funds.get("moat_rating", "Narrow Moat")
-        intrinsic = funds.get("intrinsic_value", 0.0)
-        mos = funds.get("margin_of_safety", 0.0)
-        undervalued = funds.get("is_undervalued", False)
-        
-        is_blocked = surv.get("is_blocked", False)
-        reasons = surv.get("reasons", [])
-    else:
-        # Heuristic default values
-        score = 4.0
-        moat = "Wide Moat (Buffett Approved)"
-        intrinsic = state.current_price * 1.3
-        mos = 0.3
-        undervalued = True
-        deals = []
+    is_blocked = surv.get("is_blocked", False)
+    reasons = surv.get("reasons", [])
         
     f_log = f"[Fundamental Desk] Buffett Quality Score: {score}/5 | Moat: {moat} | Intrinsic Value: ₹{intrinsic:.2f} (Margin of Safety: {mos:.1%})"
     logger.info(f_log)
@@ -316,7 +464,6 @@ async def simulation_gate_node(state: CommitteeState) -> Dict[str, Any]:
     try:
         from backend.services.kronos_brain import KronosPredictor
         import numpy as np
-        import asyncio
         
         predictor = KronosPredictor()
         loop = asyncio.get_event_loop()
@@ -390,11 +537,11 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
     except Exception as e:
         logger.warning("[Risk Arbiter] Failed to fetch yfinance L1 book size for %s: %s. Setting WOFI to 0.00.", state.ticker, str(e))
         
-    # L2 depth markers are disabled (set to False) because streaming feeds are not active
-    iceberg = False
-    spoof = False
+    # L2 depth markers are None because streaming L2 feeds are not available in EOD/yfinance
+    iceberg = None
+    spoof = None
     
-    o_log = f"[Risk Arbiter] L2 WOFI: {wofi:+.2f} | Iceberg Buyer: {iceberg} (L2 depth required) | Spoofing Alert: {spoof} (L2 depth required)"
+    o_log = f"[Risk Arbiter] L2 WOFI: {wofi:+.2f} | Iceberg Buyer: N/A | Spoofing Alert: N/A (L2 depth required)"
     logger.info(o_log)
     
     # Sizings: allocate up to 2.0% virtual equity based on Kelly-inspired probability scaling

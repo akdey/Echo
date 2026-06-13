@@ -104,6 +104,7 @@ export default function App() {
   // Operations panel execution logs
   const [operationLogs, setOperationLogs] = useState({});
   const [runningOperations, setRunningOperations] = useState({});
+  const [systemLogs, setSystemLogs] = useState([]);
 
   // Active LangGraph analysis state
   const [activeAnalysis, setActiveAnalysis] = useState({
@@ -172,6 +173,26 @@ export default function App() {
       fetchInsiders();
     }
   }, [activeTab]);
+
+  // Stream live system logs via SSE
+  useEffect(() => {
+    const logSse = new EventSource(`${API_URL}/api/operations/logs/stream`);
+    logSse.onmessage = (event) => {
+      setSystemLogs((prev) => {
+        const nextLogs = [...prev, event.data];
+        if (nextLogs.length > 500) {
+          return nextLogs.slice(nextLogs.length - 500);
+        }
+        return nextLogs;
+      });
+    };
+    logSse.onerror = (e) => {
+      console.error("SSE Logs connection error:", e);
+    };
+    return () => {
+      logSse.close();
+    };
+  }, []);
 
   // Stream LangGraph SSE updates
   useEffect(() => {
@@ -802,8 +823,8 @@ export default function App() {
 
               </div>
 
-              {/* Buffett Quality + Graham Intrinsic Value + Weinstein Momentum */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Buffett Quality + Graham Intrinsic Value + Weinstein Momentum + Risk Sizing */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-6">
                 
                 {/* Buffett Audit */}
                 <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg relative overflow-hidden backdrop-blur-md">
@@ -818,24 +839,24 @@ export default function App() {
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Derived ROCE</span>
-                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators.fundamentals.roce * 100).toFixed(1)}%</span>
+                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators?.fundamentals?.roce * 100 || 0).toFixed(1)}%</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Derived ROE</span>
-                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators.fundamentals.roe * 100).toFixed(1)}%</span>
+                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators?.fundamentals?.roe * 100 || 0).toFixed(1)}%</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Debt-to-Equity</span>
-                      <span className="font-bold text-white">{activeAnalysis.detailedIndicators.fundamentals.debt_to_equity.toFixed(2)}</span>
+                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators?.fundamentals?.debt_to_equity || 0).toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Cash Flow Integrity</span>
-                      <span className="font-bold text-white">{activeAnalysis.detailedIndicators.fundamentals.cfo_to_net_income.toFixed(2)}x</span>
+                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators?.fundamentals?.cfo_to_net_income || 0).toFixed(2)}x</span>
                     </div>
                     <div className="pt-3 border-t border-[#1a1f2c] flex justify-between items-center font-bold">
                       <span className="text-slate-400">Verdict</span>
                       <span className="bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded text-[10px]">
-                        {activeAnalysis.detailedIndicators.buffett_scorecard.verdict} ({activeAnalysis.detailedIndicators.buffett_scorecard.score}/5)
+                        {activeAnalysis.detailedIndicators?.buffett_scorecard?.verdict || "N/A"} ({activeAnalysis.detailedIndicators?.buffett_scorecard?.score || 0}/5)
                       </span>
                     </div>
                   </div>
@@ -850,16 +871,16 @@ export default function App() {
                   <div className="space-y-3 text-xs">
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Intrinsic Value</span>
-                      <span className="font-bold text-emerald-400">₹{activeAnalysis.intrinsicValue.toFixed(2)}</span>
+                      <span className="font-bold text-emerald-400">₹{(activeAnalysis.intrinsicValue || 0).toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Current Price</span>
-                      <span className="font-bold text-white">₹{activeAnalysis.currentPrice.toFixed(2)}</span>
+                      <span className="font-bold text-white">₹{(activeAnalysis.currentPrice || 0).toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Margin of Safety</span>
-                      <span className={`font-bold ${activeAnalysis.marginOfSafety >= 0.3 ? "text-emerald-400" : "text-slate-300"}`}>
-                        {(activeAnalysis.marginOfSafety * 100).toFixed(1)}%
+                      <span className={`font-bold ${(activeAnalysis.marginOfSafety || 0) >= 0.3 ? "text-emerald-400" : "text-slate-300"}`}>
+                        {((activeAnalysis.marginOfSafety || 0) * 100).toFixed(1)}%
                       </span>
                     </div>
                     <div className={`mt-5 p-3 rounded border flex items-center space-x-2.5 ${activeAnalysis.isUndervalued ? "bg-emerald-950/20 border-emerald-500/20 text-emerald-300" : "bg-slate-900/40 border-[#1a1f2c] text-slate-400"}`}>
@@ -897,19 +918,72 @@ export default function App() {
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Trend Score</span>
-                      <span className="font-bold text-white">{activeAnalysis.weinsteinScore.toFixed(2)}</span>
+                      <span className="font-bold text-white">{(activeAnalysis.weinsteinScore || 0).toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">CANSLIM Checklist Rating</span>
-                      <span className="font-bold text-white">{activeAnalysis.canslimScore.toFixed(2)}</span>
+                      <span className="font-bold text-white">{(activeAnalysis.canslimScore || 0).toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">Breakout Volume</span>
-                      <span className="font-bold text-white">{activeAnalysis.detailedIndicators.technical.sma_150 > 0 ? "SMA-150 Slope check OK" : "N/A"}</span>
+                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators?.technical?.sma_150 || 0) > 0 ? "SMA-150 Slope check OK" : "N/A"}</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-slate-400">SMC Liquidity Sweeps</span>
-                      <span className="font-bold text-white">{activeAnalysis.detailedIndicators.technical.sweeps.length} Detected</span>
+                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators?.technical?.sweeps?.length || 0)} Detected</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Risk Arbiter & Order Book Analysis */}
+                <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg relative overflow-hidden backdrop-blur-md">
+                  <div className="absolute top-0 left-0 w-1 h-full bg-rose-500" />
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5"><ShieldAlert className="text-rose-500" size={12} />Risk Arbiter & Sizing</span>
+                  </h3>
+                  <div className="space-y-3 text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">L1 book imbalance (WOFI)</span>
+                      <span className={`font-bold ${activeAnalysis.wofiScore > 0 ? "text-emerald-400" : activeAnalysis.wofiScore < 0 ? "text-rose-400" : "text-slate-400"}`}>
+                        {activeAnalysis.wofiScore > 0 ? "+" : ""}{(activeAnalysis.wofiScore || 0).toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400 font-medium flex items-center gap-1">
+                        Iceberg Buyer
+                        <span className="echo-tooltip text-slate-500 hover:text-white">
+                          <HelpCircle size={10} />
+                          <span className="echo-tooltiptext">Iceberg order detection algorithms require live L2 order book depth feeds.</span>
+                        </span>
+                      </span>
+                      <span className="font-bold text-slate-500">
+                        {activeAnalysis.icebergDetected === null || activeAnalysis.icebergDetected === undefined ? "L2 depth required" : activeAnalysis.icebergDetected ? "DETECTED" : "None"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400 font-medium flex items-center gap-1">
+                        Spoofing Alert
+                        <span className="echo-tooltip text-slate-500 hover:text-white">
+                          <HelpCircle size={10} />
+                          <span className="echo-tooltiptext">Spoofing audit rules require live order cancellation books.</span>
+                        </span>
+                      </span>
+                      <span className="font-bold text-slate-500">
+                        {activeAnalysis.spoofingDetected === null || activeAnalysis.spoofingDetected === undefined ? "L2 depth required" : activeAnalysis.spoofingDetected ? "DETECTED" : "None"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Capital Sizing</span>
+                      <span className="font-bold text-purple-400">{((activeAnalysis.allocationPercentage || 0) * 100).toFixed(2)}%</span>
+                    </div>
+                    <div className="pt-3 border-t border-[#1a1f2c] flex justify-between items-center font-bold">
+                      <span className="text-slate-400">Sizing Verdict</span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] uppercase border ${
+                        activeAnalysis.executionStatus === "trade_executed" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                        activeAnalysis.executionStatus === "trade_aborted" ? "bg-rose-500/10 text-rose-400 border-rose-500/20" : "bg-slate-800 text-slate-400 border-slate-700"
+                      }`}>
+                        {activeAnalysis.executionStatus === "trade_executed" ? "Deploy Capital" : activeAnalysis.executionStatus === "trade_aborted" ? "Aborted" : "Standby"}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -1638,18 +1712,26 @@ export default function App() {
                 <span>Live Pipeline Output Logs Terminal</span>
               </h2>
 
-              <div className="flex-1 bg-[#050608] border border-[#161a23] p-4 rounded font-mono text-[10px] text-slate-300 overflow-y-auto custom-scrollbar select-text space-y-4">
-                {Object.keys(operationLogs).map(key => (
-                  <div key={key} className="border-b border-[#151922] pb-3">
-                    <div className="text-purple-400 font-extrabold uppercase mb-1 tracking-wider text-[9px]">[Operation: {key}]</div>
-                    <pre className="whitespace-pre-wrap leading-relaxed">{operationLogs[key]}</pre>
-                  </div>
-                ))}
-                {Object.keys(operationLogs).length === 0 && (
-                  <div className="text-slate-600 text-center py-40 italic">
-                    Terminal idle. Click "Execute" on any system crawler to inspect the live return values.
-                  </div>
-                )}
+              <div className="flex-1 bg-[#030406] border border-[#161a23] p-4 rounded font-mono text-[10px] text-slate-300 overflow-y-auto custom-scrollbar select-text flex flex-col-reverse h-[600px]">
+                <div>
+                  {systemLogs.map((log, i) => {
+                    let color = "text-slate-400";
+                    if (log.includes("[INFO]")) color = "text-slate-300";
+                    if (log.includes("[WARNING]")) color = "text-amber-400 font-bold";
+                    if (log.includes("[ERROR]") || log.includes("[CRITICAL]")) color = "text-rose-400 font-bold";
+                    if (log.includes("[SUCCESS]") || log.includes("completed") || log.includes("verified")) color = "text-emerald-400";
+                    return (
+                      <div key={i} className={`${color} leading-relaxed font-mono whitespace-pre-wrap mb-1`}>
+                        {log}
+                      </div>
+                    );
+                  })}
+                  {systemLogs.length === 0 && (
+                    <div className="text-slate-600 text-center py-40 italic">
+                      Terminal listening on live SSE log stream... Execute any system operation or crawler to watch the logs update in real-time.
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
