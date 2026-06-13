@@ -23,7 +23,7 @@ so you can focus on the trade decision.
 ## Architecture Overview
 
 ```
-NSE Archives ──→ Bhavcopy Ingest ──→ Supabase (Postgres + pgvector)
+NSE Archives ──→ Bhavcopy Ingest ──→ Database (Postgres + pgvector)
                                           │
                        ┌──────────────────┼──────────────────────┐
                        ↓                  ↓                       ↓
@@ -42,7 +42,7 @@ NSE Archives ──→ Bhavcopy Ingest ──→ Supabase (Postgres + pgvector)
 ```
 
 **Infrastructure cost: ₹0**
-- **Database**: Supabase free tier (500 MB Postgres + pgvector)
+- **Database**: Database tier (Neon/Postgres + pgvector)
 - **Backend**: FastAPI + `uv` (deployable to Hugging Face Spaces free tier)
 - **Frontend**: Vite React (deployable to Vercel free tier)
 - **LLM**: Local Gemma-4 GGUF via `llama-cpp-python` + Pydantic schema enforcement
@@ -56,7 +56,7 @@ NSE Archives ──→ Bhavcopy Ingest ──→ Supabase (Postgres + pgvector)
 ### 1. Conviction Matrix Engine (`conviction_engine.py`)
 
 Calculates a **0–100 Conviction Score** for every Nifty 500 stock daily.
-Scores are cached in the `conviction_matrix` Supabase table and served via the
+Scores are cached in the `conviction_matrix` Database table and served via the
 REST API in milliseconds.  Replaces black-box "Buy/Sell" signals with a
 transparent, explainable confluence model.
 
@@ -92,7 +92,7 @@ Trading) archive daily.  Source: `archives.nseindia.com/corporate/sasti/`.
 - **Normalises inconsistent NSE headers**: The SASTI format changes occasionally.
   A `_COL_ALIASES` dictionary maps all known column name variants to canonical
   field names.
-- **Idempotent ingest**: The `insider_disclosures` Supabase table has a
+- **Idempotent ingest**: The `insider_disclosures` Database table has a
   `UNIQUE(symbol, acquirer_name, trade_date, quantity, transaction_type)` constraint
   so repeated crawl runs never create duplicates.
 - **Tracks**: Promoter category (Promoter / Director / KMP / Relative), transaction
@@ -128,7 +128,7 @@ Covers 13 sectoral indices: IT, Bank, Auto, Metal, Pharma, FMCG, Energy,
 Realty, Infra, Media, PSU Bank, Consumption, Healthcare.
 
 Data source: yfinance (free, daily, no API key required).
-Results are upserted to the `sector_momentum` Supabase table.
+Results are upserted to the `sector_momentum` Database table.
 
 **API**:
 ```
@@ -171,7 +171,7 @@ Downloads NSE's official **end-of-day deliverable positions report**
 - **Circuit detection**: Flags upper/lower circuit hits using EOD price vs.
   `PREV_CLOSE` comparison (`pct_change ≥ 1.95%` with `close == high`).
 - **250-day sliding window pruning**: After each ingest, dates beyond 250 trading
-  sessions are deleted from `daily_bhavcopy` to stay within Supabase free-tier
+  sessions are deleted from `daily_bhavcopy` to stay within Database free-tier
   storage limits.
 - **Lazy metadata loading**: For each new symbol not in the `companies` table,
   yfinance `.info` is called once to pull the business summary and generate a
@@ -186,12 +186,12 @@ manufacturing"), the engine:
 
 1. **Categorises** the catalyst using local Gemma-4 → theme + product list
 2. **Vectorises** the search query via `all-MiniLM-L6-v2` (local, no API cost)
-3. **Queries Supabase** via `match_companies` RPC (cosine similarity in pgvector)
-4. **Loads Bhavcopy history** from Supabase for each matched company
+3. **Queries Database** via `match_companies` RPC (cosine similarity in pgvector)
+4. **Loads Bhavcopy history** from Database for each matched company
 5. **Applies retail guardrails** (liquidity gate, operator trap, exhaustion filter)
 6. **Returns a ranked shortlist** sorted by actionability
 
-The `match_companies` RPC must be created in your Supabase SQL Editor:
+The `match_companies` RPC must be created in your Database SQL Editor:
 ```sql
 CREATE OR REPLACE FUNCTION match_companies (
   query_embedding vector(384),
@@ -215,7 +215,7 @@ $$;
 
 ### 7. Private Trade Journal (`trade_journal` table)
 
-A structured, personal trade ledger stored in Supabase.  Forces discipline:
+A structured, personal trade ledger stored in Database.  Forces discipline:
 **you cannot log a trade without specifying a stop-loss**.
 
 **Fields**: symbol, entry date, entry price, quantity, conviction score (at time
@@ -301,7 +301,7 @@ Streamed in real-time via Server-Sent Events (SSE) to the React dashboard
 - **Market Price Protection**: Rewrites market orders as limit orders at
   `LTP × 1.015` (buy) / `LTP × 0.985` (sell), rounded to ₹0.05 tick size.
 - **Dynamic Watchlist Sync**: ASM, GSM, T2T lists scraped live from NSE via
-  Playwright and synced to the `surveillance` Supabase table each morning.
+  Playwright and synced to the `surveillance` Database table each morning.
 
 ---
 
@@ -346,7 +346,7 @@ GET  /api/news/catalysts      — returns material corporate catalysts from toda
 
 ## Database Schema
 
-Run the migration scripts in `backend/supabase_migrations/` in your Supabase SQL Editor to create all tables.
+Run the migration scripts in `backend/database_migrations/` in your Database SQL Editor to create all tables.
 
 | Table | Purpose |
 |---|---|
@@ -366,8 +366,8 @@ Run the migration scripts in `backend/supabase_migrations/` in your Supabase SQL
 
 | Variable | Required | Description |
 |---|---|---|
-| `SUPABASE_URL` | ✅ | Supabase project REST endpoint |
-| `SUPABASE_KEY` | ✅ | Supabase `anon` or `service_role` key |
+| `DATABASE_URL` | ✅ | SQLAlchemy database URL (Neon, local SQLite, Postgres) |
+
 | `TELEGRAM_BOT_TOKEN` | Optional | Telegram bot for alerts |
 | `TELEGRAM_CHAT_ID` | Optional | Target chat/channel ID |
 | `SMTP_HOST` | Optional | SMTP server (default `smtp.gmail.com`) |
@@ -387,10 +387,9 @@ Run the migration scripts in `backend/supabase_migrations/` in your Supabase SQL
 cd backend && uv sync
 
 # Set environment variables
-export SUPABASE_URL="https://xxxx.supabase.co"
-export SUPABASE_KEY="your_anon_key"
+export DATABASE_URL="postgresql://user:password@host/dbname?sslmode=require"
 
-# Run migrations — paste phase12_conviction_schema.sql into Supabase SQL Editor
+# Run migrations — paste phase12_conviction_schema.sql into Database SQL Editor
 
 # Start API server
 uv run uvicorn backend.main:app --reload --port 8000
@@ -404,7 +403,7 @@ cd frontend && npm install && npm run dev
 ## Deployment (Hugging Face Spaces — Free Tier)
 
 1. Push to your Hugging Face Space repository.
-2. Set `SUPABASE_URL` and `SUPABASE_KEY` as Space Secrets.
+2. Set `DATABASE_URL` as a Space Secret.
 3. Set up a free [cron-job.org](https://cron-job.org) webhook to call
    `POST https://your-space.hf.space/api/jobs/nightly` at 8:30 PM IST on weekdays.
 4. Set Telegram vars for alerts if desired.
@@ -427,7 +426,7 @@ graph TD
     C[React Dashboard Visualizer] <-->|Rest APIs & SSE Transitions| D
     D <-->|Read/Write Cache| B[(Redis Digital Twin)]
     D -->|Autoregressive Monte Carlo| E[Kronos Simulation Service]
-    D <-->|Thematic description & vectors| H[(Supabase pgvector PostgreSQL)]
+    D <-->|Thematic description & vectors| H[(Database pgvector PostgreSQL)]
     
     subgraph Local LLM Gateway
         D -->|ThreadPoolExecutor| F[llama-cpp-python]
@@ -468,8 +467,8 @@ To ensure total data privacy, avoid external API token costs, and maintain zero 
 ### B. Persistent & Self-Updating Thematic Engine (pgvector RAG & EOD Bhavcopy)
 This module automates the process of mapping top-down policy catalysts (e.g. government budget allocations) to listed Indian suppliers, tracking institutional delivery accumulation, and enforcing retail protection guardrails.
 
-1. **Supabase pgvector Database Backend**:
-   - Replaces the SQLite Graph Store and local yfinance caches with a PostgreSQL database hosted on Supabase's free tier.
+1. **Postgres Database Backend (Neon / Database)**:
+   - Replaces the SQLite Graph Store and local yfinance caches with a PostgreSQL database hosted on Database's free tier.
    - **Schema**:
      - `companies`: Holds stock symbols, names, industry, and description.
        - `symbol` TEXT PRIMARY KEY (e.g. `"BEL.NS"`)
@@ -490,8 +489,8 @@ This module automates the process of mapping top-down policy catalysts (e.g. gov
 
 3. **Daily Bhavcopy Ingestion (The Retail Edge)**:
    - Downloads the official EOD deliverable positions report (`sec_bhavdata_full_ddmmyyyy.csv`) from NSE archives.
-   - Synchronizes prices, volume, and deliverable shares to Supabase.
-   - Enforces a **250-day sliding window database retention policy** to prune older rows and remain safely within Supabase's free-tier storage limits (500MB).
+   - Synchronizes prices, volume, and deliverable shares to Database.
+   - Enforces a **250-day sliding window database retention policy** to prune older rows and remain safely within Database's free-tier storage limits (500MB).
 
 4. **Institutional Accumulation Indicator**:
    - Calculates the 20-day average delivery volume percentage. If the latest EOD delivery percentage is $\ge 45\%$ and represents a $\ge 1.3\text{x}$ spike above its 20-day average, the stock is marked as under active **"Institutional Buying (High Delivery)"**.
@@ -499,7 +498,7 @@ This module automates the process of mapping top-down policy catalysts (e.g. gov
 5. **Retail safety Guardrails**:
    - **Operator Trap Filter**: Flags a stock with an `Operator Pump Warning` if it hits upper price circuits for 3 consecutive days while operating cash flow (CFO) is negative.
    - **Liquidity Check**: Filters out any stock where the 20-day average daily turnover is less than ₹5 Crores.
-   - **ASM/GSM Surveillance Blocks**: Syncs Playwright-scraped watchlists to Supabase and automatically grays out or blocks trades on Stage 4 GSM/ASM symbols.
+   - **ASM/GSM Surveillance Blocks**: Syncs Playwright-scraped watchlists to Database and automatically grays out or blocks trades on Stage 4 GSM/ASM symbols.
 
 6. **Data Anomaly Sanity Filters**:
    - **Zero/Negative Price Filter**: Filters out and ignores daily close prices $\le 0$.
@@ -519,7 +518,7 @@ This module automates the process of mapping top-down policy catalysts (e.g. gov
    - `POST /api/thematic/node`: Adds/updates a company profile (auto-vectorizing description).
    - `DELETE /api/thematic/node/{node_id}`: Deletes a company profile.
    - `POST /api/thematic/edge` / `DELETE /api/thematic/edge/{edge_id}`: Deprecated (returns status warning).
-   - `POST /api/thematic/crawl`: Manually triggers the daily NSE Bhavcopy crawl and Supabase ingest.
+   - `POST /api/thematic/crawl`: Manually triggers the daily NSE Bhavcopy crawl and Database ingest.
 
 ---
 
