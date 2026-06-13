@@ -32,6 +32,9 @@ dependencies = [
     "sqlalchemy>=2.0.30",
     # ── Vector DB ──────────────────────────────────────────────────
     "chromadb",
+    # ── Broker API ─────────────────────────────────────────────────
+    "smartapi-python",
+    "pyotp",
 ]
 
 [tool.uv]

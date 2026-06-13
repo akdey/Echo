@@ -43,6 +43,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from backend.services.angel_gateway import AngelOneGateway
 
 from backend.services.scraper_utils import fetch_nse_json, _make_session
 from backend.services.db_handler import (
@@ -77,32 +78,15 @@ MIDCAP_FALLBACK = "MIDCPNIFTY.NS"   # Fallback if primary unavailable
 class PreMarketSanityCheck:
     """
     Runs at 9:15:05 AM IST on every market day.
-    Fetches live NSE opening prices via curl-cffi (Chrome TLS impersonation).
+    Fetches live NSE prices via Angel One SmartAPI.
     Aborts trades where the stock gaps up > 3% from previous close.
 
     The gap-up abort prevents buying at distribution tops where retail FOMO
     has already priced in the news before your AMO executes.
     """
 
-    def _fetch_nse_quote_sync(self, bare_symbol: str) -> Optional[Dict]:
-        """
-        Hits NSE's internal /api/quote-equity endpoint for live market data.
-        Returns the priceInfo block, or None on failure.
-        """
-        session = _make_session()
-        url = f"https://www.nseindia.com/api/quote-equity?symbol={bare_symbol}"
-        try:
-            resp = session.get(url, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("priceInfo") or data
-        except Exception as e:
-            logger.warning("[PreMarket] NSE quote fetch failed for %s: %s", bare_symbol, e)
-        return None
-
-    async def _get_nse_quote(self, bare_symbol: str) -> Optional[Dict]:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._fetch_nse_quote_sync, bare_symbol)
+    def __init__(self):
+        self.gateway = AngelOneGateway()
 
     async def check_symbol(
         self,
@@ -110,7 +94,7 @@ class PreMarketSanityCheck:
         fallback_prev_close: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Performs the pre-market gap check for a single symbol.
+        Performs the pre-market gap check for a single symbol using Angel One SmartAPI LTP.
 
         Args:
             symbol: NSE ticker e.g. "RELIANCE.NS"
@@ -120,36 +104,14 @@ class PreMarketSanityCheck:
             Dict with keys:
               action        — "PROCEED" | "ABORT_GAP_UP" | "CAUTION_GAP_DOWN" | "DATA_UNAVAILABLE"
               symbol        — input symbol
-              open_price    — today's opening price (or None)
+              open_price    — today's opening price/LTP (or None)
               prev_close    — previous session close (or None)
               gap_pct       — gap percentage (positive = up)
               reason        — human-readable explanation
         """
-        bare = symbol.replace(".NS", "").replace(".BO", "").upper()
-        quote = await self._get_nse_quote(bare)
-
-        open_price: Optional[float] = None
-        prev_close: Optional[float] = None
-
-        if quote:
-            try:
-                open_price = float(
-                    quote.get("open") or quote.get("openPrice") or
-                    quote.get("previousClose") or 0
-                )
-                prev_close = float(
-                    quote.get("previousClose") or quote.get("prevClose") or 0
-                )
-                # NSE sometimes returns 0 for open before 9:15 AM
-                if open_price == 0:
-                    open_price = None
-            except (TypeError, ValueError):
-                pass
-
-        # Fallback: use Supabase last close
+        # Get previous close first
+        prev_close = fallback_prev_close
         if prev_close is None or prev_close == 0:
-            prev_close = fallback_prev_close
-        if prev_close is None:
             try:
                 rows = await query_db("daily_bhavcopy", {
                     "symbol": f"eq.{symbol}",
@@ -162,14 +124,17 @@ class PreMarketSanityCheck:
             except Exception:
                 pass
 
-        if open_price is None or prev_close is None or prev_close == 0:
+        # Retrieve live LTP as today's open price
+        open_price = self.gateway.get_ltp(symbol, fallback_price=prev_close)
+
+        if not open_price or not prev_close:
             return {
                 "action":     "DATA_UNAVAILABLE",
                 "symbol":     symbol,
                 "open_price": open_price,
                 "prev_close": prev_close,
                 "gap_pct":    None,
-                "reason":     "NSE open price or previous close not yet available.",
+                "reason":     "LTP or previous close not available.",
             }
 
         gap_pct = (open_price - prev_close) / prev_close
@@ -823,3 +788,45 @@ async def scan_exit_signals() -> List[Dict[str, Any]]:
 async def get_position_size(total_capital: float) -> Dict[str, Any]:
     """Module-level convenience wrapper for KellyCriterion.calculate."""
     return await KellyCriterion().calculate(total_capital)
+
+
+async def check_premarket_gap(symbol: str, previous_close: float) -> Dict[str, Any]:
+    """
+    Checks if a stock's opening gap is above the threshold (LTP - previous_close) / previous_close > 0.03.
+    """
+    gateway = AngelOneGateway()
+    ltp = gateway.get_ltp(symbol, fallback_price=previous_close)
+    if not ltp or previous_close <= 0:
+        return {
+            "is_vetoed": False,
+            "action": "PROCEED",
+            "ltp": ltp or previous_close,
+            "gap_pct": 0.0,
+            "reason": "LTP or previous close not available. Proceeding with caution."
+        }
+        
+    gap_pct = (ltp - previous_close) / previous_close
+    if gap_pct > GAP_UP_ABORT_THRESHOLD:
+        return {
+            "is_vetoed": True,
+            "action": "ABORT_GAP_UP",
+            "ltp": ltp,
+            "gap_pct": gap_pct,
+            "reason": f"Gap-up of {gap_pct * 100:.2f}% exceeds the 3% threshold. Aborting trade."
+        }
+    elif gap_pct < -GAP_DOWN_CAUTION_THRESHOLD:
+        return {
+            "is_vetoed": False,
+            "action": "CAUTION_GAP_DOWN",
+            "ltp": ltp,
+            "gap_pct": gap_pct,
+            "reason": f"Gap-down of {gap_pct * 100:.2f}% detected. Proceeding with caution."
+        }
+    else:
+        return {
+            "is_vetoed": False,
+            "action": "PROCEED",
+            "ltp": ltp,
+            "gap_pct": gap_pct,
+            "reason": f"Normal opening gap of {gap_pct * 100:.2f}%. Proceeding."
+        }

@@ -2,6 +2,7 @@ import logging
 import http.client
 import json
 import re
+import os
 from typing import Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 import yfinance as yf
@@ -18,6 +19,9 @@ from backend.services.order_book import OrderBookAnalyzer
 from backend.services.fundamental_rag import FundamentalInvestigator
 from backend.services.sentiment_analyzer import SentimentAnalyzer
 from backend.services.llm_gateway import query_llm
+from backend.services.angel_gateway import AngelOneGateway
+from backend.services.risk_engine import check_premarket_gap, get_position_size
+from backend.services.db_handler import query_db, upsert_db
 
 async def get_or_compute_detailed_indicators(ticker: str) -> Dict[str, Any]:
     """
@@ -543,25 +547,176 @@ async def risk_arbiter_node(state: CommitteeState) -> Dict[str, Any]:
     
     o_log = f"[Risk Arbiter] L2 WOFI: {wofi:+.2f} | Iceberg Buyer: N/A | Spoofing Alert: N/A (L2 depth required)"
     logger.info(o_log)
+
+    today_str = datetime.date.today().isoformat()
     
-    # Sizings: allocate up to 2.0% virtual equity based on Kelly-inspired probability scaling
-    allocation = round(state.kronos_upside_prob * 0.02, 4)
+    # 1. Idempotency Check: check if trade was already logged today
+    try:
+        existing_trades = await query_db("trade_journal", {
+            "symbol": f"eq.{state.ticker}",
+            "entry_date": f"eq.{today_str}"
+        })
+        if existing_trades:
+            msg = f"[Risk Arbiter] Idempotency Check: Trade already executed today for {state.ticker} on {today_str}. Skipping duplicate order placement."
+            logger.warning(msg)
+            return {
+                "wofi_score": wofi,
+                "iceberg_detected": iceberg,
+                "spoofing_detected": spoof,
+                "allocation_percentage": state.allocation_percentage or 0.02,
+                "execution_status": "trade_executed",
+                "logs": state.logs + [o_log, msg]
+            }
+    except Exception as db_err:
+        logger.error("[Risk Arbiter] Database query error for idempotency check: %s", db_err)
+
+    # 2. Get live LTP from AngelOneGateway
+    gateway = AngelOneGateway()
+    if not gateway.is_configured:
+        msg = "[Risk Arbiter] Angel One Gateway is not configured (missing env variables). Aborting live trade."
+        logger.error(msg)
+        return {
+            "execution_status": "trade_aborted",
+            "allocation_percentage": 0.0,
+            "logs": state.logs + [o_log, msg]
+        }
+
+    ltp = gateway.get_ltp(state.ticker, fallback_price=state.current_price)
+    if ltp <= 0.0:
+        msg = f"[Risk Arbiter] Invalid LTP ({ltp}) for {state.ticker}. Aborting live trade."
+        logger.error(msg)
+        return {
+            "execution_status": "trade_aborted",
+            "allocation_percentage": 0.0,
+            "logs": state.logs + [o_log, msg]
+        }
+
+    # 3. Premarket Gap Check Veto
+    # Fetch previous close from detailed_indicators or fallback to current_price
+    prev_close = state.current_price
+    if state.detailed_indicators and "fundamentals" in state.detailed_indicators:
+        prev_close = state.detailed_indicators["fundamentals"].get("previousClose") or prev_close
+
+    gap_result = await check_premarket_gap(state.ticker, prev_close)
+    if gap_result.get("is_vetoed"):
+        msg = f"[Risk Arbiter] VETO: Premarket gap check failed for {state.ticker}. Reason: {gap_result.get('reason')}"
+        logger.warning(msg)
+        return {
+            "execution_status": "trade_aborted",
+            "allocation_percentage": 0.0,
+            "logs": state.logs + [o_log, msg]
+        }
     
-    # Calculate position details for simulated ledger
-    shares = int((1000000.0 * allocation) / state.current_price) if state.current_price > 0 else 0
-    stop_loss = round(state.current_price * 0.95, 2)
+    gap_msg = f"[Risk Arbiter] Premarket gap check passed: {gap_result.get('reason')}"
+    logger.info(gap_msg)
+
+    # 4. Calculate Sizing (Kelly)
+    total_capital = float(os.environ.get("ECHO_TOTAL_CAPITAL", "1000000.0"))
     
-    e_log = f"[Risk Arbiter] Sizing calculation: Allocation = {allocation:.2%} of capital ({shares} shares) | Stop Loss: ₹{stop_loss:.2f}"
-    logger.info(e_log)
-    
-    return {
-        "wofi_score": wofi,
-        "iceberg_detected": iceberg,
-        "spoofing_detected": spoof,
-        "allocation_percentage": allocation,
-        "execution_status": "trade_executed",
-        "logs": state.logs + [o_log, e_log]
-    }
+    try:
+        kelly_res = await get_position_size(total_capital)
+        allocation = kelly_res.get("suggested_allocation_pct", 2.0) / 100.0
+    except Exception as kelly_err:
+        logger.warning("[Risk Arbiter] Kelly position sizing error: %s. Using default 2%% allocation.", kelly_err)
+        allocation = 0.02
+
+    allocated_inr = total_capital * allocation
+    shares = int(allocated_inr / ltp) if ltp > 0 else 0
+
+    if shares <= 0:
+        msg = f"[Risk Arbiter] Calculated shares is 0 (allocated: ₹{allocated_inr:.2f}, LTP: ₹{ltp:.2f}). Aborting trade."
+        logger.warning(msg)
+        return {
+            "execution_status": "trade_aborted",
+            "allocation_percentage": 0.0,
+            "logs": state.logs + [o_log, gap_msg, msg]
+        }
+
+    # Lookup scrip master info for tick_size, tradingsymbol, and token
+    symbol_info = gateway.lookup_symbol(state.ticker)
+    if not symbol_info:
+        msg = f"[Risk Arbiter] Symbol {state.ticker} not found in Angel One instrument master. Aborting trade."
+        logger.error(msg)
+        return {
+            "execution_status": "trade_aborted",
+            "allocation_percentage": 0.0,
+            "logs": state.logs + [o_log, gap_msg, msg]
+        }
+
+    tick_size = symbol_info.get("tick_size") or 0.05
+    raw_limit_price = ltp * 1.015
+    limit_price = round(round(raw_limit_price / tick_size) * tick_size, 2)
+    stop_loss = round(ltp * 0.95, 2)
+
+    # 5. Place live order on Angel One
+    try:
+        # Check login status
+        if not gateway._login() or not gateway.smart_api:
+            raise ConnectionError("Failed to authenticate session with Angel One API.")
+
+        order_params = {
+            "variety": "NORMAL",
+            "tradingsymbol": symbol_info["tradingsymbol"],
+            "symboltoken": symbol_info["token"],
+            "transactiontype": "BUY",
+            "exchange": symbol_info["exch_seg"],
+            "ordertype": "LIMIT",
+            "producttype": "DELIVERY",
+            "duration": "DAY",
+            "price": str(limit_price),
+            "quantity": str(shares)
+        }
+        
+        logger.info("[Risk Arbiter] Dispatching normal BUY limit order for %s: qty=%d, price=₹%.2f", state.ticker, shares, limit_price)
+        order_id = gateway.smart_api.placeOrder(order_params)
+        if not order_id:
+            raise ValueError("Angel One API returned an empty order identifier.")
+            
+        e_log = f"[Risk Arbiter] Live BUY Limit Order placed. ID: {order_id} | Qty: {shares} shares @ ₹{limit_price:.2f} (LTP: ₹{ltp:.2f}) | Stop Loss: ₹{stop_loss:.2f}"
+        logger.info(e_log)
+
+        # 6. Log trade to database only on successful execution
+        # Compute dynamic conviction score scaled 0-100
+        conviction_score = int(
+            (state.fundamental_score / 5.0 * 0.3 +
+             state.weinstein_score * 0.2 +
+             state.canslim_score * 0.2 +
+             state.sentiment_score * 0.1 +
+             state.kronos_upside_prob * 0.2) * 100
+        )
+        conviction_score = max(0, min(100, conviction_score))
+
+        db_payload = {
+            "symbol": state.ticker,
+            "entry_date": today_str,
+            "entry_price": float(limit_price),
+            "quantity": int(shares),
+            "conviction_score": conviction_score,
+            "stop_loss": float(stop_loss),
+            "target_price": float(round(ltp * 1.15, 2)),
+            "catalyst": f"Real-money limit order placed via Angel One SmartAPI. Order ID: {order_id}"
+        }
+        await upsert_db("trade_journal", [db_payload])
+        db_log = "[Risk Arbiter] Trade successfully recorded in trade_journal."
+        logger.info(db_log)
+
+        return {
+            "wofi_score": wofi,
+            "iceberg_detected": iceberg,
+            "spoofing_detected": spoof,
+            "allocation_percentage": allocation,
+            "execution_status": "trade_executed",
+            "logs": state.logs + [o_log, gap_msg, e_log, db_log]
+        }
+
+    except Exception as broker_err:
+        err_msg = f"[Risk Arbiter] Live execution failed. Broker error: {broker_err}"
+        logger.error(err_msg, exc_info=True)
+        return {
+            "allocation_percentage": 0.0,
+            "execution_status": "trade_aborted",
+            "logs": state.logs + [o_log, gap_msg, err_msg]
+        }
 
 async def abort_trade_node(state: CommitteeState) -> Dict[str, Any]:
     log_msg = f"[Risk Arbiter] CRITICAL: Shortlist candidate {state.ticker} rejected. Circuit breaker active. Trading aborted to protect capital."
