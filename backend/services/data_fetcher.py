@@ -9,6 +9,7 @@ import datetime
 import requests
 import yfinance as yf
 from typing import List, Dict, Any, Optional
+from curl_cffi import requests as curl_requests
 
 from backend.services.redis_pipeline import RedisPipeline
 from backend.services.db_handler import query_db, upsert_db, delete_db, IS_DB_CONFIGURED
@@ -103,15 +104,54 @@ class DataFetcher:
 
     async def fetch_and_cache_ticker(self, ticker: str, period: str = "60d", interval: str = "1d", session: Optional[Any] = None) -> bool:
         """
-        Fetch daily/hourly OHLCVA candles for a ticker using yfinance, calculate amount,
-        and cache the structured tensor in Redis.
+        Fetch daily/hourly OHLCVA candles for a ticker. Checks local database (daily_bhavcopy)
+        first for daily interval, and falls back to yfinance if data is missing or hourly interval is requested.
         """
         try:
+            # 1. Try to load daily data from the local database
+            if interval == "1d" and IS_DB_CONFIGURED:
+                try:
+                    logger.info("Checking database for historical candles of %s...", ticker)
+                    rows = await query_db("daily_bhavcopy", {
+                        "symbol": f"eq.{ticker}",
+                        "order": "trade_date.asc"
+                    })
+                    if rows and len(rows) >= 150:
+                        logger.info("Successfully loaded %d candles from database for %s. Caching in Redis.", len(rows), ticker)
+                        candles = []
+                        for row in rows:
+                            close_price = float(row.get("close", 0.0))
+                            volume = float(row.get("volume", 0.0))
+                            trade_date_str = row.get("trade_date")
+                            try:
+                                dt = datetime.datetime.strptime(trade_date_str, "%Y-%m-%d")
+                                timestamp = dt.isoformat()
+                            except Exception:
+                                timestamp = trade_date_str
+
+                            candles.append({
+                                "timestamp": timestamp,
+                                "open": float(row.get("open", 0.0)),
+                                "high": float(row.get("high", 0.0)),
+                                "low": float(row.get("low", 0.0)),
+                                "close": close_price,
+                                "volume": volume,
+                                "amount": close_price * volume
+                            })
+                        success = await self.redis_pipeline.store_ohlcva(ticker, interval, candles)
+                        if success:
+                            return True
+                    else:
+                        logger.info("Insufficient database history for %s (%d records). Falling back to yfinance.", ticker, len(rows) if rows else 0)
+                except Exception as db_err:
+                    logger.warning("Failed to fetch historical candles from database for %s: %s", ticker, db_err)
+
+            # 2. Fallback to yfinance
             max_retries = 3
             df = None
             for attempt in range(max_retries):
                 try:
-                    logger.info("Fetching data for %s (period=%s, interval=%s), attempt %d/%d...", 
+                    logger.info("Fetching data for %s (period=%s, interval=%s) from yfinance, attempt %d/%d...", 
                                 ticker, period, interval, attempt + 1, max_retries)
                     ticker_obj = yf.Ticker(ticker, session=session)
                     loop = asyncio.get_event_loop()
@@ -121,7 +161,7 @@ class DataFetcher:
                     )
                     break
                 except Exception as e:
-                    logger.warning("Attempt %d to fetch history for %s failed. Error: %s", attempt + 1, ticker, str(e))
+                    logger.warning("Attempt %d to fetch history for %s from yfinance failed. Error: %s", attempt + 1, ticker, str(e))
                     if attempt < max_retries - 1:
                         sleep_time = (5.0 * (attempt + 1)) + random.uniform(1.0, 3.0)
                         logger.info("Rate limit / connection error. Backing off for %.2f seconds...", sleep_time)
@@ -130,7 +170,7 @@ class DataFetcher:
                         raise e
 
             if df is None or df.empty:
-                logger.warning("No data returned for ticker %s", ticker)
+                logger.warning("No yfinance data returned for ticker %s", ticker)
                 return False
 
             candles = []
@@ -183,24 +223,40 @@ class DataFetcher:
 
     async def download_and_parse_bhavcopy(self, trade_date: datetime.date) -> List[Dict[str, Any]]:
         """
-        Downloads NSE's EOD Deliverable Positions Bhavcopy for a given date,
+        Downloads NSE's EOD Deliverable Positions Bhavcopy for a given date using curl_cffi,
         parses the CSV, and extracts pricing and deliverable volume metrics.
         """
         # Format: https://archives.nseindia.com/products/content/sec_bhavdata_full_ddmmyyyy.csv
         date_str = trade_date.strftime("%d%m%Y")
         url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
+            "Referer": "https://www.nseindia.com/"
+        }
         
         try:
-            logger.info("Downloading EOD Bhavcopy from NSE for date %s...", trade_date.isoformat())
-            req = urllib.request.Request(url, headers=headers)
+            logger.info("Downloading EOD Bhavcopy from NSE for date %s using curl_cffi...", trade_date.isoformat())
             loop = asyncio.get_event_loop()
             
-            content_bytes = await loop.run_in_executor(
-                None,
-                lambda: urllib.request.urlopen(req, timeout=15).read()
-            )
-            content = content_bytes.decode('utf-8')
+            def fetch_url():
+                session = curl_requests.Session(impersonate="chrome110")
+                session.headers.update(headers)
+                try:
+                    session.get("https://www.nseindia.com/", timeout=10)
+                except Exception as e:
+                    logger.debug("NSE home session initialization failed: %s", e)
+                
+                resp = session.get(url, timeout=15)
+                if resp.status_code != 200:
+                    logger.warning("Bhavcopy request returned status code: %d", resp.status_code)
+                    return None
+                return resp.text
+
+            content = await loop.run_in_executor(None, fetch_url)
+            if not content:
+                return []
             
             # Clean header spaces and parse CSV
             f = io.StringIO(content)
