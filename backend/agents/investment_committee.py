@@ -274,6 +274,32 @@ async def simulation_gate_node(state: CommitteeState) -> Dict[str, Any]:
     await redis_pipeline.disconnect()
     
     if not candles:
+        # Fall back to fetching history directly
+        try:
+            ticker_obj = yf.Ticker(state.ticker)
+            loop = asyncio.get_event_loop()
+            df = await loop.run_in_executor(
+                None,
+                lambda: ticker_obj.history(period="6mo", interval="1d")
+            )
+            if not df.empty:
+                candles = []
+                for idx, row in df.iterrows():
+                    trade_date = idx.date().isoformat() if isinstance(idx, pd.Timestamp) else str(idx)
+                    close_val = float(row["Close"])
+                    candles.append({
+                        "timestamp": trade_date,
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "close": close_val,
+                        "volume": float(row["Volume"]),
+                        "amount": close_val * float(row["Volume"])
+                    })
+        except Exception as e:
+            logger.warning("[Simulation Gate] Failed to load yfinance fallback: %s", e)
+            
+    if not candles:
         sim_log = "[Simulation Gate] No historical OHLCV data available for regime simulation. Returning neutral parameters."
         logger.warning(sim_log)
         return {
@@ -284,37 +310,57 @@ async def simulation_gate_node(state: CommitteeState) -> Dict[str, Any]:
         }
         
     history = candles[-50:] # feed last 50 days to model
-    
-    payload = {
-        "ticker": state.ticker,
-        "history": history,
-        "steps": 24,
-        "num_paths": 30,
-        "temperature": 0.7
-    }
-    
     upside_prob = 0.5
     vol_risk = 0.0
     
     try:
-        # Call Kronos FastAPI microservice running on port 8001
-        conn = http.client.HTTPConnection("127.0.0.1", 8001, timeout=10)
-        headers = {"Content-type": "application/json"}
-        conn.request("POST", "/simulate_regime", json.dumps(payload), headers)
-        response = conn.getresponse()
+        from backend.services.kronos_brain import KronosPredictor
+        import numpy as np
+        import asyncio
         
-        if response.status == 200:
-            res_data = json.loads(response.read().decode())
-            upside_prob = res_data["upside_probability"]
-            vol_risk = res_data["volatility_amplification"]
-            sim_log = f"[Simulation Gate] Autoregressive rollouts completed. Upside Probability: {upside_prob:.1%} | Volatility Amplification: {vol_risk:.1%}"
+        predictor = KronosPredictor()
+        loop = asyncio.get_event_loop()
+        
+        # Convert history candles to dicts with lowercase float values
+        formatted_history = []
+        for c in history:
+            close = float(c.get("close", 0.0))
+            vol = float(c.get("volume", 0.0))
+            formatted_history.append({
+                "timestamp": c.get("trade_date") or c.get("timestamp") or "",
+                "open": float(c.get("open", close)),
+                "high": float(c.get("high", close)),
+                "low": float(c.get("low", close)),
+                "close": close,
+                "volume": vol,
+                "amount": close * vol
+            })
+            
+        paths = await loop.run_in_executor(
+            None,
+            lambda: predictor.run_monte_carlo_rollout(
+                formatted_history,
+                steps=24,
+                num_paths=30,
+                temperature=0.7
+            )
+        )
+        
+        if paths:
+            start_close = formatted_history[-1]["close"]
+            final_closes = [path[-1]["close"] for path in paths]
+            successful_paths = sum(1 for fc in final_closes if fc >= start_close)
+            upside_prob = float(successful_paths / len(paths))
+            
+            std_final_closes = float(np.std(final_closes))
+            vol_risk = float(std_final_closes / start_close) if start_close > 0 else 0.0
+            sim_log = f"[Simulation Gate] Local Kronos autoregressive rollouts completed. Upside Probability: {upside_prob:.1%} | Volatility Amplification: {vol_risk:.1%}"
         else:
-            sim_log = f"[Simulation Gate] Kronos service returned {response.status}. Falling back to neutral parameters."
+            sim_log = "[Simulation Gate] Kronos predictor returned empty paths. Falling back to neutral parameters."
             upside_prob = 0.5
             vol_risk = 0.0
-        conn.close()
     except Exception as e:
-        sim_log = f"[Simulation Gate] Connection to Kronos microservice failed ({str(e)}). Falling back to neutral parameters."
+        sim_log = f"[Simulation Gate] Local Kronos simulation execution failed ({str(e)}). Falling back to neutral parameters."
         upside_prob = 0.5
         vol_risk = 0.0
         

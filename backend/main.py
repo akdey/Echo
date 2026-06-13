@@ -34,6 +34,16 @@ from backend.services.supabase_client import (
     verify_supabase_connection,
     IS_SUPABASE_CONFIGURED
 )
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from backend.services.news_engine import (
+    run_full_news_pipeline,
+    MacroNewsEngine,
+    CorporateAnnouncementCrawler,
+    WatchlistNewsScanner,
+    fetch_active_overrides
+)
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -823,6 +833,239 @@ async def portfolio_risk_scan(
         results["alerts"].append(f"🚨 {abort_count} trade(s) have gap-up > 3% at open — abort those AMOs.")
 
     return {"status": "success", **results}
+
+
+# ── NEWS ENGINE ENDPOINTS ─────────────────────────────────────────────────────
+
+@app.post("/api/news/pipeline")
+async def trigger_news_pipeline():
+    """
+    Manually triggers the full Three-Tier News Ingestion Pipeline.
+    Runs Tier 1 (Macro) -> Tier 2 (Corporate Announcements) -> Tier 3 (Watchlist scans)
+    sequentially and returns the accumulated signals and overrides.
+    """
+    try:
+        results = await run_full_news_pipeline()
+        return {"status": "success", "pipeline_results": results}
+    except Exception as e:
+        logger.error("[API] News pipeline execution failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/news/crawl/{tier}")
+async def crawl_news_tier(tier: int):
+    """
+    Triggers news crawling for a specific tier manually:
+      - Tier 1: Global Macro (DuckDuckGo News)
+      - Tier 2: Corporate Announcements (NSE API announcements crawler)
+      - Tier 3: Watchlist-Targeted News Sentiment
+    """
+    if tier not in [1, 2, 3]:
+        raise HTTPException(status_code=400, detail="Invalid news tier. Must be 1, 2, or 3.")
+    
+    try:
+        if tier == 1:
+            result = await MacroNewsEngine().run()
+        elif tier == 2:
+            result = await CorporateAnnouncementCrawler().run()
+        else:
+            result = await WatchlistNewsScanner().run()
+        return {"status": "success", "tier": tier, "result": result}
+    except Exception as e:
+        logger.error("[API] Crawl for tier %d failed: %s", tier, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/news/signals")
+async def get_news_signals(limit: int = 100):
+    """Returns the processed news signals from Supabase news_signals table."""
+    limit = min(limit, 200)
+    try:
+        rows = await query_supabase("news_signals", {
+            "select": "*",
+            "order": "processed_at.desc",
+            "limit": str(limit),
+        })
+        return {"status": "success", "count": len(rows), "signals": rows}
+    except Exception as e:
+        logger.error("[API] Failed to fetch news signals: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/news/overrides")
+async def get_conviction_overrides():
+    """Returns all active (non-expired) conviction overrides."""
+    try:
+        # Call the helper RPC or query table directly
+        rows = await rpc_supabase("get_active_conviction_overrides", {})
+        if not rows:
+            # Fall back to manual filter if RPC is not registered
+            now_iso = __import__("datetime").datetime.utcnow().isoformat()
+            rows = await query_supabase("conviction_overrides", {
+                "select": "*",
+                "expires_at": f"gt.{now_iso}",
+                "limit": "200",
+            })
+        return {"status": "success", "overrides": rows}
+    except Exception as e:
+        logger.error("[API] Failed to fetch overrides: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/news/catalysts")
+async def get_today_catalysts():
+    """Returns all material corporate catalysts flagged within the last 24 hours."""
+    try:
+        # Query the view or run manual query
+        now_iso = (__import__("datetime").datetime.utcnow() - __import__("datetime").timedelta(hours=24)).isoformat()
+        rows = await query_supabase("news_signals", {
+            "select": "*",
+            "tier": "eq.2",
+            "is_material_catalyst": "eq.true",
+            "processed_at": f"gt.{now_iso}",
+            "order": "processed_at.desc",
+            "limit": "100",
+        })
+        return {"status": "success", "count": len(rows), "catalysts": rows}
+    except Exception as e:
+        logger.error("[API] Failed to fetch material catalysts: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── DATA HISTORY & SIMULATION ENDPOINTS ───────────────────────────────────────
+
+@app.get("/api/history/{symbol}")
+async def get_symbol_history(symbol: str, limit: int = 100):
+    """
+    Returns the last `limit` daily bars for the given stock from Supabase daily_bhavcopy.
+    Falls back to yfinance history if Supabase is empty or not configured.
+    """
+    symbol = symbol.upper()
+    if not symbol.endswith((".NS", ".BO")):
+        symbol += ".NS"
+    
+    rows = []
+    if IS_SUPABASE_CONFIGURED:
+        try:
+            # Query Supabase daily_bhavcopy table
+            rows = await query_supabase("daily_bhavcopy", {
+                "symbol": f"eq.{symbol}",
+                "order": "trade_date.desc",
+                "limit": str(limit),
+            })
+            # Reverse to chronological order
+            rows.reverse()
+        except Exception as e:
+            logger.warning("[API] Failed to fetch history from Supabase: %s", e)
+            
+    if not rows:
+        # Fall back to yfinance
+        try:
+            loop = asyncio.get_event_loop()
+            ticker_obj = yf.Ticker(symbol)
+            df = await loop.run_in_executor(
+                None,
+                lambda: ticker_obj.history(period="6mo", interval="1d")
+            )
+            if not df.empty:
+                # Keep last `limit` rows
+                df = df.tail(limit)
+                df = df.reset_index()
+                for _, row in df.iterrows():
+                    # Format date string
+                    t_val = row.get("Date")
+                    if isinstance(t_val, pd.Timestamp):
+                        trade_date = t_val.date().isoformat()
+                    else:
+                        trade_date = str(t_val).split(" ")[0]
+                        
+                    rows.append({
+                        "trade_date": trade_date,
+                        "close": float(row["Close"]),
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "volume": int(row["Volume"]),
+                        "delivery_pct": 0.0, # no delivery info in yfinance
+                        "delivery_volume": 0
+                    })
+        except Exception as e:
+            logger.error("[API] yfinance history fallback failed for %s: %s", symbol, e)
+            raise HTTPException(status_code=500, detail=f"Failed to load history for {symbol}")
+            
+    return {"status": "success", "symbol": symbol, "history": rows}
+
+
+@app.get("/api/simulate/{symbol}")
+async def run_symbol_simulation(symbol: str):
+    """
+    Runs a Kronos Monte Carlo simulation for the given stock.
+    Fetches the latest 50 daily close bars and runs the simulator.
+    """
+    symbol = symbol.upper()
+    if not symbol.endswith((".NS", ".BO")):
+        symbol += ".NS"
+        
+    # 1. Fetch latest 50 days of history
+    history_resp = await get_symbol_history(symbol, limit=50)
+    history = history_resp.get("history", [])
+    if not history:
+        raise HTTPException(status_code=400, detail=f"No history found for {symbol}")
+        
+    # Convert history keys to the expected CandleInput fields (volume, amount)
+    formatted_history = []
+    for h in history:
+        close = float(h.get("close", 0.0))
+        vol = float(h.get("volume", 0.0))
+        formatted_history.append({
+            "timestamp": h.get("trade_date") or h.get("timestamp") or "",
+            "open": float(h.get("open", close)),
+            "high": float(h.get("high", close)),
+            "low": float(h.get("low", close)),
+            "close": close,
+            "volume": vol,
+            "amount": close * vol
+        })
+        
+    try:
+        from backend.services.kronos_brain import KronosPredictor
+        predictor = KronosPredictor()
+        
+        loop = asyncio.get_event_loop()
+        paths = await loop.run_in_executor(
+            None,
+            lambda: predictor.run_monte_carlo_rollout(
+                formatted_history,
+                steps=24,
+                num_paths=30,
+                temperature=0.7
+            )
+        )
+        
+        if not paths:
+            raise HTTPException(status_code=400, detail="Failed to run simulations.")
+            
+        start_close = formatted_history[-1]["close"]
+        final_closes = [path[-1]["close"] for path in paths]
+        successful_paths = sum(1 for fc in final_closes if fc >= start_close)
+        upside_probability = float(successful_paths / len(paths))
+        
+        std_final_closes = float(np.std(final_closes))
+        volatility_amplification = float(std_final_closes / start_close) if start_close > 0 else 0.0
+        is_safe = bool(upside_probability >= 0.85 and volatility_amplification <= 0.15)
+        
+        # Return first 3 sample paths for visualization, plus summary stats
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "upside_probability": upside_probability,
+            "volatility_amplification": volatility_amplification,
+            "is_safe": is_safe,
+            "paths": paths[:3]
+        }
+    except Exception as e:
+        logger.error("[API] Simulation run failed for %s: %s", symbol, e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

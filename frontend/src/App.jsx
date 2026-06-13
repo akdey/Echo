@@ -9,7 +9,10 @@ import {
   ReferenceLine, 
   ResponsiveContainer,
   AreaChart,
-  Area
+  Area,
+  BarChart,
+  Bar,
+  Legend
 } from "recharts";
 import { 
   TrendingUp, 
@@ -31,14 +34,22 @@ import {
   FileSpreadsheet,
   Globe,
   Radio,
-  Clock
+  Clock,
+  Plus,
+  Trash2,
+  Newspaper,
+  ShieldCheck,
+  Flame,
+  Activity,
+  Settings
 } from "lucide-react";
 import "./App.css";
 
-const API_URL = import.meta.env.VITE_API_URL || "";
+const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 export default function App() {
-  // Navigation & selection
+  // Navigation & tabs
+  const [activeTab, setActiveTab] = useState("committee"); // committee | conviction | news | sectors | journal | operations
   const [candidates, setCandidates] = useState([]);
   const [selectedTicker, setSelectedTicker] = useState("RELIANCE.NS");
   const [tickerInput, setTickerInput] = useState("RELIANCE");
@@ -46,114 +57,123 @@ export default function App() {
   const [currentNode, setCurrentNode] = useState("");
   const [logs, setLogs] = useState([]);
   
-  // Pipeline analysis states (active selection)
+  // Real historical and simulation data states
+  const [historicalData, setHistoricalData] = useState([]);
+  const [projectionData, setProjectionData] = useState([]);
+  const [simulationStats, setSimulationStats] = useState({ upsideProb: 0.5, volRisk: 0.0, isSafe: false });
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [simLoading, setSimLoading] = useState(false);
+
+  // Conviction list & overrides
+  const [convictionList, setConvictionList] = useState([]);
+  const [activeOverrides, setActiveOverrides] = useState([]);
+  const [convictionLoading, setConvictionLoading] = useState(false);
+
+  // News signals & material catalysts
+  const [newsSignals, setNewsSignals] = useState([]);
+  const [materialCatalysts, setMaterialCatalysts] = useState([]);
+  const [newsLoading, setNewsLoading] = useState(false);
+
+  // Sector rotation & Insiders
+  const [sectorHeatmap, setSectorHeatmap] = useState([]);
+  const [insiderFeed, setInsiderFeed] = useState([]);
+  const [sectorsLoading, setSectorsLoading] = useState(false);
+  const [insiderLoading, setInsiderLoading] = useState(false);
+
+  // Trade journal ledger
+  const [journalEntries, setJournalEntries] = useState([]);
+  const [journalLoading, setJournalLoading] = useState(false);
+  const [journalForm, setJournalForm] = useState({
+    symbol: "",
+    entry_date: new Date().toISOString().split("T")[0],
+    entry_price: "",
+    quantity: "",
+    conviction_score: 75,
+    catalyst: "",
+    stop_loss: "",
+    target_price: ""
+  });
+  const [exitForm, setExitForm] = useState({
+    trade_id: "",
+    exit_date: new Date().toISOString().split("T")[0],
+    exit_price: "",
+    outcome_notes: ""
+  });
+  const [showExitModal, setShowExitModal] = useState(false);
+
+  // Operations panel execution logs
+  const [operationLogs, setOperationLogs] = useState({});
+  const [runningOperations, setRunningOperations] = useState({});
+
+  // Active LangGraph analysis state
   const [activeAnalysis, setActiveAnalysis] = useState({
     ticker: "RELIANCE.NS",
     companyName: "Reliance Industries Limited",
     sector: "Energy",
     industry: "Oil & Gas Refineries",
     currentPrice: 1263.0,
-    fundamentalScore: 4.0,
-    moatRating: "Wide Moat (Buffett Approved)",
-    intrinsicValue: 1641.90,
-    marginOfSafety: 0.23,
+    fundamentalScore: 0,
+    moatRating: "N/A",
+    intrinsicValue: 0,
+    marginOfSafety: 0,
     isUndervalued: false,
-    weinsteinStage: "Stage 2 (Markup)",
-    weinsteinScore: 0.8,
-    canslimScore: 0.8,
-    timingStatus: "Optimal Buy",
-    timingDescription: "The stock has recently broken out into a new uptrend (Stage 2 Markup) and is trading close to its support line. This is the ideal low-risk entry window.",
-    sentimentScore: 0.78,
-    unscriptedDivergence: 0.12,
+    weinsteinStage: "N/A",
+    weinsteinScore: 0,
+    canslimScore: 0,
+    timingStatus: "Neutral",
+    timingDescription: "",
+    sentimentScore: 0.5,
+    unscriptedDivergence: 0,
     isInvalidated: false,
-    wofiScore: 0.45,
+    wofiScore: 0,
     icebergDetected: false,
     spoofingDetected: false,
     isBlocked: false,
     surveillanceReasons: [],
-    allocationPercentage: 0.018,
-    executionStatus: "initialized",
+    allocationPercentage: 0,
+    executionStatus: "idle",
     detailedIndicators: {
-      technical: { sma_50: 1210.0, sma_150: 1195.0, ema_20: 1245.0, fvgs: [], sweeps: [] },
-      fundamentals: { roce: 0.168, roe: 0.155, cfo_to_net_income: 1.18, debt_to_equity: 0.38, operating_margin: 0.185 },
-      buffett_scorecard: { score: 4, total_rules: 5, verdict: "Excellent (Buffett Approved)" },
+      technical: { sma_50: 0, sma_150: 0, ema_20: 0, fvgs: [], sweeps: [] },
+      fundamentals: { roce: 0, roe: 0, cfo_to_net_income: 0, debt_to_equity: 0, operating_margin: 0 },
+      buffett_scorecard: { score: 0, total_rules: 5, verdict: "Pending Run" },
       surveillance: { is_blocked: false, reasons: [] },
       deals: []
     },
-    fiiDiiFlows: { fii_net_crores: 120.5, dii_net_crores: 1450.0, rolling_5d_fii: 420.0, rolling_5d_dii: 7200.0, market_state: "Net Accumulation" },
-    deals: []
+    fiiDiiFlows: { fii_net_crores: 0, dii_net_crores: 0, rolling_5d_fii: 0, rolling_5d_dii: 0, market_state: "N/A" }
   });
 
-  // Simulated paper-trading holdings
-  const [positions, setPositions] = useState([
-    { ticker: "RELIANCE.NS", buyPrice: 1263.0, currentPrice: 1263.0, size: 142, stopLoss: 1199.85, pnl: 0.0, status: "Active" }
-  ]);
+  // System general metrics
+  const [simulatedBalance, setSimulatedBalance] = useState(1000000.0);
 
-  // Chart data
-  const [historicalData, setHistoricalData] = useState([]);
-  const [projectionData, setProjectionData] = useState([]);
-
-  // Load candidate list on mount
+  // Synchronous initial fetches
   useEffect(() => {
     fetchCandidates();
+    fetchJournal();
   }, []);
 
-  // Fetch initial historical close and simulations on ticker change
+  // Fetch history and run simulations when ticker changes
   useEffect(() => {
-    generateMockCharts(activeAnalysis.currentPrice, activeAnalysis.kronosUpsideProb || 0.85);
+    if (selectedTicker) {
+      fetchHistory(selectedTicker);
+      fetchSimulation(selectedTicker);
+    }
   }, [selectedTicker]);
 
-  const fetchCandidates = async () => {
-    try {
-      const res = await fetch(`${API_URL}/api/screen`);
-      const data = await res.json();
-      if (data.status === "success" && data.candidates) {
-        setCandidates(data.candidates);
-        if (data.candidates.length > 0) {
-          // Select first candidate by default
-          const first = data.candidates[0];
-          setSelectedTicker(first.ticker);
-          setTickerInput(first.ticker.replace(".NS", "").replace(".BO", ""));
-        }
-      }
-    } catch (e) {
-      console.error("Failed to fetch screened list:", e);
+  // Fetch tab-specific data when active tab changes
+  useEffect(() => {
+    if (activeTab === "conviction") {
+      fetchConviction();
+      fetchOverrides();
+    } else if (activeTab === "news") {
+      fetchNewsSignals();
+      fetchCatalysts();
+    } else if (activeTab === "sectors") {
+      fetchSectors();
+      fetchInsiders();
     }
-  };
+  }, [activeTab]);
 
-  const generateMockCharts = (price, upsideProb) => {
-    // 1. Generate 30 days of historical trend
-    const hist = [];
-    let tempPrice = price - 60;
-    for (let i = 0; i < 30; i++) {
-      tempPrice += (upsideProb - 0.48) * 4.0 + (Math.sin(i * 0.4) * 5.0) + (Math.random() - 0.5) * 10;
-      hist.push({
-        day: `T-${30 - i}`,
-        price: parseFloat(tempPrice.toFixed(2)),
-        sma_150: parseFloat((tempPrice * 0.96).toFixed(2))
-      });
-    }
-    setHistoricalData(hist);
-
-    // 2. Generate Monte Carlo future paths (3 bands)
-    const proj = [];
-    const steps = 24;
-    for (let s = 0; s <= steps; s++) {
-      const meanOffset = s * (upsideProb - 0.5) * 6.0;
-      const dev = Math.sqrt(s + 1) * 12.0;
-      proj.push({
-        step: `D+${s}`,
-        lower95: parseFloat((price + meanOffset - 1.96 * dev).toFixed(2)),
-        lower68: parseFloat((price + meanOffset - 1.0 * dev).toFixed(2)),
-        median: parseFloat((price + meanOffset).toFixed(2)),
-        upper68: parseFloat((price + meanOffset + 1.0 * dev).toFixed(2)),
-        upper95: parseFloat((price + meanOffset + 1.96 * dev).toFixed(2))
-      });
-    }
-    setProjectionData(proj);
-  };
-
-  // Subscribe to SSE updates
+  // Stream LangGraph SSE updates
   useEffect(() => {
     const sse = new EventSource(`${API_URL}/api/stream_pipeline`);
 
@@ -195,19 +215,13 @@ export default function App() {
               allocationPercentage: u.allocation_percentage !== undefined ? u.allocation_percentage : prev.allocationPercentage,
               executionStatus: u.execution_status || prev.executionStatus,
               detailedIndicators: u.detailed_indicators || prev.detailedIndicators,
-              fiiDiiFlows: u.fii_dii_flows || prev.fiiDiiFlows,
-              deals: u.deals || prev.deals
+              fiiDiiFlows: u.fii_dii_flows || prev.fiiDiiFlows
             };
-
-            if (u.current_price || u.kronos_upside_prob) {
-              generateMockCharts(u.current_price || prev.currentPrice, u.kronos_upside_prob || 0.85);
-            }
-
             return next;
           });
 
           if (u.logs) {
-            setLogs(u.logs);
+            setLogs((prev) => [...prev, ...u.logs.filter(l => !prev.includes(l))]);
           }
         }
       } catch (e) {
@@ -217,6 +231,184 @@ export default function App() {
     return () => sse.close();
   }, []);
 
+  // API Call Helpers
+  const fetchCandidates = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/screen`);
+      const data = await res.json();
+      if (data.status === "success" && data.candidates) {
+        setCandidates(data.candidates);
+        if (data.candidates.length > 0 && !selectedTicker) {
+          setSelectedTicker(data.candidates[0].ticker);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch screened list:", e);
+    }
+  };
+
+  const fetchHistory = async (symbol) => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/history/${symbol}`);
+      const data = await res.json();
+      if (data.status === "success" && data.history) {
+        // Map keys to display names
+        const formatted = data.history.map(item => ({
+          day: item.trade_date,
+          price: item.close,
+          open: item.open,
+          high: item.high,
+          low: item.low,
+          volume: item.volume,
+          delivery_pct: item.delivery_pct * 100
+        }));
+        setHistoricalData(formatted);
+      }
+    } catch (e) {
+      console.error("Failed to fetch history:", e);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const fetchSimulation = async (symbol) => {
+    setSimLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/simulate/${symbol}`);
+      const data = await res.json();
+      if (data.status === "success" && data.paths) {
+        setSimulationStats({
+          upsideProb: data.upside_probability,
+          volRisk: data.volatility_amplification,
+          isSafe: data.is_safe
+        });
+        
+        // Convert paths list [ [ {close, volume...}, ...], ... ] into step-based recharts structure
+        const stepsCount = data.paths[0].length;
+        const formatted = [];
+        for (let s = 0; s < stepsCount; s++) {
+          formatted.push({
+            step: `D+${s + 1}`,
+            pathA: data.paths[0][s].close,
+            pathB: data.paths[1][s].close,
+            pathC: data.paths[2][s].close
+          });
+        }
+        setProjectionData(formatted);
+      }
+    } catch (e) {
+      console.error("Failed to fetch simulation:", e);
+    } finally {
+      setSimLoading(false);
+    }
+  };
+
+  const fetchConviction = async () => {
+    setConvictionLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/conviction`);
+      const data = await res.json();
+      if (data.status === "success" && data.results) {
+        setConvictionList(data.results);
+      }
+    } catch (e) {
+      console.error("Failed to fetch conviction leaderboard:", e);
+    } finally {
+      setConvictionLoading(false);
+    }
+  };
+
+  const fetchOverrides = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/news/overrides`);
+      const data = await res.json();
+      if (data.status === "success" && data.overrides) {
+        setActiveOverrides(data.overrides);
+      }
+    } catch (e) {
+      console.error("Failed to fetch active overrides:", e);
+    }
+  };
+
+  const fetchNewsSignals = async () => {
+    setNewsLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/news/signals`);
+      const data = await res.json();
+      if (data.status === "success" && data.signals) {
+        setNewsSignals(data.signals);
+      }
+    } catch (e) {
+      console.error("Failed to fetch news signals:", e);
+    } finally {
+      setNewsLoading(false);
+    }
+  };
+
+  const fetchCatalysts = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/news/catalysts`);
+      const data = await res.json();
+      if (data.status === "success" && data.catalysts) {
+        setMaterialCatalysts(data.catalysts);
+      }
+    } catch (e) {
+      console.error("Failed to fetch material catalysts:", e);
+    }
+  };
+
+  const fetchSectors = async () => {
+    setSectorsLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/sectors`);
+      const data = await res.json();
+      if (data.status === "success" && data.sectors) {
+        setSectorHeatmap(data.sectors);
+      }
+    } catch (e) {
+      console.error("Failed to fetch sector heatmap:", e);
+    } finally {
+      setSectorsLoading(false);
+    }
+  };
+
+  const fetchInsiders = async () => {
+    setInsiderLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/insiders`);
+      const data = await res.json();
+      if (data.status === "success" && data.disclosures) {
+        setInsiderFeed(data.disclosures);
+      }
+    } catch (e) {
+      console.error("Failed to fetch insider feed:", e);
+    } finally {
+      setInsiderLoading(false);
+    }
+  };
+
+  const fetchJournal = async () => {
+    setJournalLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/journal`);
+      const data = await res.json();
+      if (data.status === "success" && data.entries) {
+        setJournalEntries(data.entries);
+        // Recalculate virtual balance based on realized PnL
+        const closedRealized = data.entries
+          .filter(e => e.exit_date !== null)
+          .reduce((sum, item) => sum + parseFloat(item.pnl || 0), 0);
+        setSimulatedBalance(1000000.0 + closedRealized);
+      }
+    } catch (e) {
+      console.error("Failed to fetch journal entries:", e);
+    } finally {
+      setJournalLoading(false);
+    }
+  };
+
+  // Execution actions
   const triggerAnalysis = async (targetTicker) => {
     const symbol = targetTicker.toUpperCase().endsWith(".NS") || targetTicker.toUpperCase().endsWith(".BO")
       ? targetTicker.toUpperCase()
@@ -232,27 +424,8 @@ export default function App() {
         body: JSON.stringify({ ticker: symbol })
       });
       const data = await response.json();
-      if (data.status === "success" && data.final_state) {
-        const final = data.final_state;
-        
-        // Push paper ledger update if trade executes
-        if (final.execution_status === "trade_executed") {
-          const buyPrice = final.current_price || 1200.0;
-          const allocationVal = final.allocation_percentage || 0.015;
-          const size = Math.floor((1000000.0 * allocationVal) / buyPrice);
-          const stopLoss = parseFloat((buyPrice * 0.95).toFixed(2));
-          
-          const newPos = {
-            ticker: symbol,
-            buyPrice: buyPrice,
-            currentPrice: buyPrice,
-            size: size,
-            stopLoss: stopLoss,
-            pnl: 0.0,
-            status: "Active"
-          };
-          setPositions((prev) => [newPos, ...prev.filter(p => p.ticker !== symbol)]);
-        }
+      if (data.status === "success") {
+        fetchJournal();
       }
     } catch (e) {
       console.error("Analysis execution failed:", e);
@@ -267,631 +440,652 @@ export default function App() {
     triggerAnalysis(ticker);
   };
 
-  // Helper score badges
+  // Journal handlers
+  const handleLogTrade = async (e) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`${API_URL}/api/journal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: journalForm.symbol.toUpperCase().endsWith(".NS") ? journalForm.symbol.toUpperCase() : `${journalForm.symbol.toUpperCase()}.NS`,
+          entry_date: journalForm.entry_date,
+          entry_price: parseFloat(journalForm.entry_price),
+          quantity: parseInt(journalForm.quantity),
+          conviction_score: parseInt(journalForm.conviction_score),
+          catalyst: journalForm.catalyst,
+          stop_loss: parseFloat(journalForm.stop_loss),
+          target_price: journalForm.target_price ? parseFloat(journalForm.target_price) : null
+        })
+      });
+      if (response.ok) {
+        fetchJournal();
+        setJournalForm({
+          symbol: "",
+          entry_date: new Date().toISOString().split("T")[0],
+          entry_price: "",
+          quantity: "",
+          conviction_score: 75,
+          catalyst: "",
+          stop_loss: "",
+          target_price: ""
+        });
+      } else {
+        const error = await response.json();
+        alert(`Error: ${error.detail}`);
+      }
+    } catch (e) {
+      console.error("Failed to log trade:", e);
+    }
+  };
+
+  const handleExitTrade = async (e) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`${API_URL}/api/journal/exit`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          trade_id: exitForm.trade_id,
+          exit_date: exitForm.exit_date,
+          exit_price: parseFloat(exitForm.exit_price),
+          outcome_notes: exitForm.outcome_notes
+        })
+      });
+      if (response.ok) {
+        setShowExitModal(false);
+        fetchJournal();
+      } else {
+        const error = await response.json();
+        alert(`Error: ${error.detail}`);
+      }
+    } catch (e) {
+      console.error("Failed to exit trade:", e);
+    }
+  };
+
+  const handleDeleteTrade = async (tradeId) => {
+    if (!confirm("Are you sure you want to permanently delete this trade journal entry?")) return;
+    try {
+      const response = await fetch(`${API_URL}/api/journal/${tradeId}`, {
+        method: "DELETE"
+      });
+      if (response.ok) {
+        fetchJournal();
+      }
+    } catch (e) {
+      console.error("Failed to delete trade:", e);
+    }
+  };
+
+  // Operations Runner
+  const runOperation = async (operationKey, endpoint, method = "POST") => {
+    setRunningOperations(prev => ({ ...prev, [operationKey]: true }));
+    setOperationLogs(prev => ({ ...prev, [operationKey]: "Running..." }));
+    try {
+      const res = await fetch(`${API_URL}${endpoint}`, { method });
+      const data = await res.json();
+      setOperationLogs(prev => ({ 
+        ...prev, 
+        [operationKey]: JSON.stringify(data, null, 2) 
+      }));
+      // Refresh general views if they are updated by these operations
+      fetchCandidates();
+      fetchJournal();
+    } catch (e) {
+      setOperationLogs(prev => ({ 
+        ...prev, 
+        [operationKey]: `Error executing job: ${e.toString()}` 
+      }));
+    } finally {
+      setRunningOperations(prev => ({ ...prev, [operationKey]: false }));
+    }
+  };
+
+  // Timing Color Badges
   const getTimingBadgeColor = (status) => {
     switch (status) {
-      case "Optimal Buy": return "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30";
-      case "Accumulation": return "bg-[#e2ba34]/15 text-[#e2ba34] border-[#e2ba34]/30";
-      case "Train Has Left": return "bg-orange-500/15 text-orange-400 border-orange-500/30";
-      case "Avoid": return "bg-red-500/15 text-red-400 border-red-500/30";
+      case "Optimal Buy": return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+      case "Accumulation": return "bg-cyan-500/10 text-cyan-400 border-cyan-500/20";
+      case "Train Has Left": return "bg-amber-500/10 text-amber-400 border-amber-500/20";
+      case "Avoid": return "bg-red-500/10 text-red-400 border-red-500/20";
       default: return "bg-slate-800 text-slate-400 border-slate-700";
     }
   };
 
-  return (
-    <div className="min-h-screen bg-[#08090d] text-slate-100 p-6 flex flex-col font-sans selection:bg-[#9c27b0]/30 selection:text-white">
-      
-      {/* GLOW BAR */}
-      <div className="h-1 bg-gradient-to-r from-violet-600 via-purple-600 to-emerald-500" />
+  const getRegimeBadgeColor = (regime) => {
+    switch (regime) {
+      case "LEAD": return "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30";
+      case "IMPROVE": return "bg-cyan-500/15 text-cyan-400 border border-cyan-500/30";
+      case "WEAKEN": return "bg-amber-500/15 text-amber-400 border border-amber-500/30";
+      case "LAG": return "bg-red-500/15 text-red-400 border border-red-500/30";
+      default: return "bg-slate-800 text-slate-400";
+    }
+  };
 
+  return (
+    <div className="min-h-screen bg-[#07080a] text-slate-100 p-6 flex flex-col font-sans selection:bg-purple-600/30 selection:text-white">
+      
       {/* HEADER SECTION */}
-      <header className="flex flex-col xl:flex-row justify-between items-start xl:items-center py-6 border-b border-[#1b1e28] mb-6 gap-4">
+      <header className="flex flex-col xl:flex-row justify-between items-start xl:items-center py-5 border-b border-[#151922] mb-6 gap-4">
         <div>
           <div className="flex items-center space-x-3">
-            <span className="bg-[#9c27b0] text-[10px] font-extrabold tracking-widest px-2.5 py-0.5 rounded text-white uppercase animate-pulse">REGULATORY TRACE ACTIVE</span>
-            <h1 className="text-3xl font-black tracking-tighter text-white flex items-center">
-              ECHO <span className="text-[#9c27b0] ml-1.5 font-bold">SCREENER</span>
+            <span className="bg-purple-600 text-[10px] font-extrabold tracking-widest px-2 py-0.5 rounded text-white uppercase animate-pulse">L2 PIPELINE STABLE</span>
+            <h1 className="text-2xl font-black tracking-tight text-white flex items-center">
+              ECHO <span className="text-purple-500 ml-1 font-bold">DASHBOARD</span>
             </h1>
           </div>
-          <p className="text-slate-400 text-xs mt-1.5 font-medium flex items-center gap-2">
-            <Radio size={12} className="text-[#00ff88] animate-pulse" />
-            Institutional Multi-Agent Investment Committee (SEBI 2026 Compliant)
+          <p className="text-slate-400 text-xs mt-1 font-medium flex items-center gap-2">
+            <Radio size={12} className="text-emerald-400 animate-pulse" />
+            Institutional Intelligence Platform for Indian Cash Equity
           </p>
         </div>
 
-        {/* Paper Account Balance Radar */}
-        <div className="flex items-center space-x-6 bg-[#0f1118]/80 border border-[#1d212d] px-6 py-3.5 rounded-xl backdrop-blur-md shadow-2xl">
+        {/* Balance Display */}
+        <div className="flex items-center space-x-6 bg-[#0c0e14]/90 border border-[#1a1f2c] px-5 py-3 rounded-lg shadow-2xl">
           <div>
-            <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-widest">Simulated Equity</span>
-            <span className="text-xl font-black text-[#00ff88] tracking-tight">₹10,00,000.00</span>
+            <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-widest">Paper Capital</span>
+            <span className="text-lg font-black text-emerald-400 tracking-tight">₹{simulatedBalance.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
           </div>
-          <div className="border-l border-[#1d212d] h-9" />
+          <div className="border-l border-[#1a1f2c] h-8" />
           <div>
-            <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-widest">Active Ledger</span>
-            <span className="text-xl font-black text-white tracking-tight flex items-center justify-end">
-              <Briefcase size={16} className="text-[#c084fc] mr-1.5" />
-              {positions.length}
+            <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-widest">Active Trades</span>
+            <span className="text-lg font-black text-white tracking-tight flex items-center justify-end">
+              <Briefcase size={14} className="text-purple-400 mr-1.5" />
+              {journalEntries.filter(e => e.exit_date === null).length}
             </span>
           </div>
         </div>
       </header>
 
-      {/* CRAWLER CONTROLS & MANUAL SEARCH */}
-      <section className="bg-[#0f1118]/60 border border-[#1b1e28] p-4 rounded-xl mb-6 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-3 w-full xl:w-auto">
-          <Compass className="text-[#a855f7] flex-shrink-0" size={20} />
-          <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Ticker Research:</span>
-          <div className="relative">
-            <input 
-              type="text" 
-              className="bg-[#08090c] border border-[#272d3e] rounded-lg px-4 py-2 text-xs font-bold focus:outline-none focus:border-[#a855f7] focus:ring-1 focus:ring-[#a855f7] text-white uppercase w-32 xl:w-44"
-              value={tickerInput}
-              onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
-            />
-          </div>
-          <button 
-            onClick={() => triggerAnalysis(tickerInput)} 
-            disabled={loading}
-            className="bg-[#9c27b0] hover:bg-[#b030b0] text-white px-5 py-2 rounded-lg text-xs font-extrabold flex items-center space-x-2 disabled:opacity-50 transition-all duration-200 shadow-md shadow-[#9c27b0]/20"
-          >
-            {loading ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : (
-              <Play size={12} className="fill-current" />
-            )}
-            <span>{loading ? "Running Committee..." : "Execute Analysis"}</span>
-          </button>
-        </div>
+      {/* TABS NAVIGATION */}
+      <nav className="flex flex-wrap border-b border-[#151922] mb-6 gap-1.5">
+        <button 
+          onClick={() => setActiveTab("committee")}
+          className={`px-5 py-3 text-xs font-bold transition-all duration-200 border-b-2 flex items-center gap-2 ${activeTab === "committee" ? "border-purple-500 text-purple-400 bg-purple-500/5" : "border-transparent text-slate-400 hover:text-white"}`}
+        >
+          <Cpu size={14} />
+          Multi-Agent Committee
+        </button>
+        <button 
+          onClick={() => setActiveTab("conviction")}
+          className={`px-5 py-3 text-xs font-bold transition-all duration-200 border-b-2 flex items-center gap-2 ${activeTab === "conviction" ? "border-purple-500 text-purple-400 bg-purple-500/5" : "border-transparent text-slate-400 hover:text-white"}`}
+        >
+          <Flame size={14} />
+          Conviction Matrix
+        </button>
+        <button 
+          onClick={() => setActiveTab("news")}
+          className={`px-5 py-3 text-xs font-bold transition-all duration-200 border-b-2 flex items-center gap-2 ${activeTab === "news" ? "border-purple-500 text-purple-400 bg-purple-500/5" : "border-transparent text-slate-400 hover:text-white"}`}
+        >
+          <Newspaper size={14} />
+          Three-Tier News Signals
+        </button>
+        <button 
+          onClick={() => setActiveTab("sectors")}
+          className={`px-5 py-3 text-xs font-bold transition-all duration-200 border-b-2 flex items-center gap-2 ${activeTab === "sectors" ? "border-purple-500 text-purple-400 bg-purple-500/5" : "border-transparent text-slate-400 hover:text-white"}`}
+        >
+          <Globe size={14} />
+          Sectors & Insiders
+        </button>
+        <button 
+          onClick={() => setActiveTab("journal")}
+          className={`px-5 py-3 text-xs font-bold transition-all duration-200 border-b-2 flex items-center gap-2 ${activeTab === "journal" ? "border-purple-500 text-purple-400 bg-purple-500/5" : "border-transparent text-slate-400 hover:text-white"}`}
+        >
+          <Briefcase size={14} />
+          Trade Journal Ledger
+        </button>
+        <button 
+          onClick={() => setActiveTab("operations")}
+          className={`px-5 py-3 text-xs font-bold transition-all duration-200 border-b-2 flex items-center gap-2 ${activeTab === "operations" ? "border-purple-500 text-purple-400 bg-purple-500/5" : "border-transparent text-slate-400 hover:text-white"}`}
+        >
+          <Settings size={14} />
+          System Operations
+        </button>
+      </nav>
 
-        {/* Global Market Flows Status */}
-        <div className="flex items-center space-x-4 text-xs font-bold">
-          <div className="flex items-center space-x-1.5 bg-[#00ff88]/10 text-[#00ff88] px-3 py-1.5 rounded-lg border border-[#00ff88]/20">
-            <TrendingUp size={14} />
-            <span>FII Daily Net: {activeAnalysis.fiiDiiFlows.fii_net_crores > 0 ? "+" : ""}{activeAnalysis.fiiDiiFlows.fii_net_crores} Cr</span>
-          </div>
-          <div className="flex items-center space-x-1.5 bg-[#00ff88]/10 text-[#00ff88] px-3 py-1.5 rounded-lg border border-[#00ff88]/20">
-            <TrendingUp size={14} />
-            <span>DII Daily Net: +{activeAnalysis.fiiDiiFlows.dii_net_crores} Cr</span>
-          </div>
-          <div className="flex items-center space-x-1.5 bg-slate-800/50 text-slate-300 px-3 py-1.5 rounded-lg border border-slate-700/50">
-            <span>Market Regime: {activeAnalysis.fiiDiiFlows.market_state}</span>
-          </div>
-        </div>
-      </section>
-
-      {/* CORE WORKSPACE GRID */}
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 flex-1 items-start">
+      {/* CORE ACTIVE WORKSPACE */}
+      <div className="flex-1 min-h-0">
         
-        {/* SIDEBAR: SCREENER CANDIDATES LIST */}
-        <aside className="glass-panel p-4 h-[750px] flex flex-col">
-          <h2 className="text-xs font-black uppercase tracking-widest text-slate-300 border-b border-[#1b1e28] pb-3 mb-3 flex items-center gap-1.5">
-            <Layers size={14} className="text-[#a855f7]" />
-            <span>Screened Breakouts ({candidates.length})</span>
-          </h2>
-          
-          <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1">
-            {candidates.map((c) => (
-              <div 
-                key={c.ticker}
-                onClick={() => handleSelectCandidate(c.ticker)}
-                className={`p-3 rounded-lg border cursor-pointer transition-all duration-200 ${
-                  selectedTicker === c.ticker 
-                    ? "bg-[#9c27b0]/10 border-[#9c27b0] shadow-md shadow-[#9c27b0]/5" 
-                    : "bg-[#0b0c10]/40 border-[#1d212d] hover:bg-[#0f1118]/80 hover:border-slate-600"
-                }`}
-              >
-                <div className="flex justify-between items-start">
-                  <div className="font-black text-xs text-white">{c.ticker}</div>
-                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-extrabold border ${getTimingBadgeColor(c.timing_status)}`}>
-                    {c.timing_status}
-                  </span>
-                </div>
-                <div className="text-[10px] text-slate-400 mt-1 truncate">{c.company_name}</div>
-                <div className="flex justify-between items-center mt-2.5 text-[9px] font-bold text-slate-500">
-                  <span>Price: ₹{c.current_price}</span>
-                  <span className="text-[#a855f7]">{c.weinstein_stage.split(" ")[0]}</span>
-                </div>
-              </div>
-            ))}
-            {candidates.length === 0 && (
-              <div className="text-slate-500 text-center py-20 italic text-xs">
-                No active screened stocks. Run background scans to populate.
-              </div>
-            )}
-          </div>
-        </aside>
-
-        {/* WORKSPACE CONTENT AREA */}
-        <main className="xl:col-span-3 space-y-6">
-
-          {/* ACTIVE TICKER PROFILE & TIMING CARD */}
-          <div className="glass-panel p-5 grid grid-cols-1 md:grid-cols-3 gap-6 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1.5 h-full bg-[#9c27b0]" />
+        {/* TAB 1: MULTI-AGENT COMMITTEE (THE CORE STOCK DASHBOARD) */}
+        {activeTab === "committee" && (
+          <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
             
-            <div className="md:col-span-2">
-              <div className="text-[10px] text-[#9c27b0] font-black uppercase tracking-widest">{activeAnalysis.sector} // {activeAnalysis.industry}</div>
-              <h2 className="text-2xl font-black text-white mt-1 tracking-tight">{activeAnalysis.companyName}</h2>
-              <div className="flex items-baseline space-x-3 mt-2">
-                <span className="text-2xl font-black tracking-tight text-white">₹{activeAnalysis.currentPrice.toFixed(2)}</span>
-                <span className="text-xs font-bold text-slate-400 uppercase">NSE: {activeAnalysis.ticker}</span>
-              </div>
-            </div>
-
-            {/* Timing & Entry Warning */}
-            <div className={`p-4 rounded-xl border flex flex-col justify-between ${getTimingBadgeColor(activeAnalysis.timingStatus)}`}>
-              <div className="flex justify-between items-start">
-                <span className="text-[9px] uppercase font-black tracking-widest">Entry Assessment</span>
-                <Clock size={14} />
-              </div>
-              <div className="mt-3">
-                <div className="text-lg font-black tracking-tight">{activeAnalysis.timingStatus}</div>
-                <p className="text-[10px] opacity-80 leading-normal mt-1">{activeAnalysis.timingDescription}</p>
-              </div>
-            </div>
-          </div>
-
-          {/* CHARTS CONTAINER GRID */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            
-            {/* Historical Price Trend */}
-            <div className="glass-panel p-5 min-h-0 min-w-0">
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
-                <span>30-Day Historical Trend & Moving Averages</span>
-                <span className="echo-tooltip">
-                  <HelpCircle size={12} className="text-slate-500" />
-                  <span className="echo-tooltiptext">
-                    Shows historical closing price relative to the 150-day SMA. Buffett and Weinstein look for price to hold constructively above the average line in Stage 2.
-                  </span>
-                </span>
-              </h3>
+            {/* Sidebar list of screened breakout candidates */}
+            <aside className="bg-[#0b0d12]/50 border border-[#161a23] p-4 rounded-lg flex flex-col h-[750px] backdrop-blur-md">
+              <h2 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-3 flex items-center gap-1.5">
+                <Layers size={14} className="text-purple-400" />
+                <span>Screened Breakouts ({candidates.length})</span>
+              </h2>
               
-              <div className="h-56 w-full min-h-0 min-w-0">
-                <ResponsiveContainer width="100%" height="100%" minHeight={224}>
-                  <LineChart data={historicalData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="day" stroke="#475569" style={{ fontSize: 9, fontWeight: "bold" }} />
-                    <YAxis stroke="#475569" domain={["auto", "auto"]} style={{ fontSize: 9, fontWeight: "bold" }} />
-                    <ChartTooltip contentStyle={{ backgroundColor: "#0f1118", border: "1px solid #1b1e28" }} />
-                    <Line type="monotone" dataKey="price" stroke="#00ff88" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="sma_150" stroke="#9c27b0" strokeWidth={1.5} strokeDasharray="3 3" dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+              <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                {candidates.map((c) => (
+                  <div 
+                    key={c.ticker}
+                    onClick={() => handleSelectCandidate(c.ticker)}
+                    className={`p-3 rounded border cursor-pointer transition-all duration-200 ${selectedTicker === c.ticker ? "bg-purple-900/10 border-purple-500" : "bg-[#07080a]/40 border-[#1c2230] hover:bg-[#0c0e14] hover:border-slate-500"}`}
+                  >
+                    <div className="flex justify-between items-start">
+                      <div className="font-bold text-xs text-white">{c.ticker}</div>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-black border ${getTimingBadgeColor(c.timing_status)}`}>
+                        {c.timing_status}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1 truncate">{c.company_name}</div>
+                    <div className="flex justify-between items-center mt-2 text-[9px] font-bold text-slate-500">
+                      <span>Price: ₹{c.current_price}</span>
+                      <span className="text-purple-400">{c.weinstein_stage}</span>
+                    </div>
+                  </div>
+                ))}
+                {candidates.length === 0 && (
+                  <div className="text-slate-500 text-center py-20 italic text-xs">
+                    No active screened breakouts. Trigger a screening run in the Operations tab.
+                  </div>
+                )}
               </div>
-            </div>
+            </aside>
 
-            {/* Kronos Monte Carlo Projections */}
-            <div className="glass-panel p-5 min-h-0 min-w-0">
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
-                <span>Kronos Autoregressive Monte Carlo (24 Days Future)</span>
-                <span className="echo-tooltip">
-                  <HelpCircle size={12} className="text-slate-500" />
-                  <span className="echo-tooltiptext">
-                    Autoregressive simulation paths displaying future price projections. Green/Yellow bands indicate 68% and 95% probability limits. Red reference shows support stop floor.
-                  </span>
-                </span>
-              </h3>
+            {/* Main analysis workspace */}
+            <main className="xl:col-span-3 space-y-6">
               
-              <div className="h-56 w-full min-h-0 min-w-0">
-                <ResponsiveContainer width="100%" height="100%" minHeight={224}>
-                  <AreaChart data={projectionData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="step" stroke="#475569" style={{ fontSize: 9, fontWeight: "bold" }} />
-                    <YAxis stroke="#475569" domain={["auto", "auto"]} style={{ fontSize: 9, fontWeight: "bold" }} />
-                    <ChartTooltip contentStyle={{ backgroundColor: "#0f1118", border: "1px solid #1b1e28" }} />
-                    <ReferenceLine y={activeAnalysis.currentPrice * 0.95} stroke="#ef4444" strokeDasharray="3 3" label={{ value: "Stop Floor", fill: "#ef4444", fontSize: 9 }} />
-                    <Area type="monotone" dataKey="upper95" stackId="1" stroke="none" fill="rgba(0, 255, 136, 0.03)" />
-                    <Area type="monotone" dataKey="upper68" stackId="2" stroke="none" fill="rgba(0, 255, 136, 0.08)" />
-                    <Area type="monotone" dataKey="median" stroke="#00ff88" fill="none" strokeWidth={2} />
-                    <Area type="monotone" dataKey="lower68" stackId="3" stroke="none" fill="rgba(0, 255, 136, 0.08)" />
-                    <Area type="monotone" dataKey="lower95" stackId="4" stroke="none" fill="rgba(0, 255, 136, 0.03)" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
+              {/* Header profile of selected stock */}
+              <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg grid grid-cols-1 md:grid-cols-3 gap-6 relative overflow-hidden backdrop-blur-md">
+                <div className="absolute top-0 left-0 w-1 h-full bg-purple-500" />
+                <div className="md:col-span-2">
+                  <div className="text-[9px] text-purple-400 font-bold uppercase tracking-widest">{activeAnalysis.sector} // {activeAnalysis.industry}</div>
+                  <h2 className="text-xl font-black text-white mt-1 tracking-tight">{activeAnalysis.companyName}</h2>
+                  
+                  {/* SEARCH TOOL */}
+                  <div className="flex items-center space-x-3 mt-3">
+                    <input 
+                      type="text" 
+                      className="bg-[#07080a] border border-[#232b3c] rounded px-3 py-1.5 text-xs font-bold text-white uppercase w-32 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500"
+                      value={tickerInput}
+                      onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
+                      placeholder="e.g. TCS"
+                    />
+                    <button 
+                      onClick={() => triggerAnalysis(tickerInput)} 
+                      disabled={loading}
+                      className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded text-xs font-bold flex items-center space-x-1.5 disabled:opacity-50 transition-all duration-200"
+                    >
+                      {loading ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <Play size={12} className="fill-current" />
+                      )}
+                      <span>{loading ? "Committee Running..." : "Run Analysis"}</span>
+                    </button>
+                    <span className="text-[10px] text-slate-500 font-medium">Symbol: {selectedTicker}</span>
+                  </div>
+                </div>
 
-          </div>
-
-          {/* METRIC SCORECARDS: THE LEGENDARY INVESTORS CORES */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            
-            {/* Warren Buffett Quality panel */}
-            <div className="glass-panel p-5 relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-1 h-full bg-blue-500" />
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <Database className="text-blue-500" size={14} />
-                  <span>Warren Buffett Quality Audit</span>
-                </span>
-                <span className="echo-tooltip">
-                  <HelpCircle size={12} className="text-slate-500" />
-                  <span className="echo-tooltiptext">
-                    Evaluates capital efficiency, leverage safety, cash flow honesty, and moat sustainability. Perfect score of 5/5 indicates high-quality compounders.
-                  </span>
-                </span>
-              </h3>
-
-              <div className="space-y-2.5 text-xs">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Moat Classification</span>
-                  <span className="font-bold text-blue-400 text-[11px]">{activeAnalysis.moatRating}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400 flex items-center gap-1">
-                    ROCE (Return on Capital Employed)
-                    <span className="echo-tooltip"><HelpCircle size={10} /><span className="echo-tooltiptext">EBIT / Capital Employed. Measures pricing power and moat efficiency. Target: &gt;15%.</span></span>
-                  </span>
-                  <span className="font-bold text-white">{(activeAnalysis.detailedIndicators.fundamentals.roce * 100).toFixed(1)}%</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400 flex items-center gap-1">
-                    ROE (Return on Equity)
-                    <span className="echo-tooltip"><HelpCircle size={10} /><span className="echo-tooltiptext">Net Income / Shareholder's Equity. Measures earnings efficiency. Target: &gt;15%.</span></span>
-                  </span>
-                  <span className="font-bold text-white">{(activeAnalysis.detailedIndicators.fundamentals.roe * 100).toFixed(1)}%</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400 flex items-center gap-1">
-                    Debt-to-Equity (D/E)
-                    <span className="echo-tooltip"><HelpCircle size={10} /><span className="echo-tooltiptext">Debt leverage ratio. Target: &lt;0.5. Buffett avoids heavily indebted firms.</span></span>
-                  </span>
-                  <span className="font-bold text-white">{activeAnalysis.detailedIndicators.fundamentals.debt_to_equity.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400 flex items-center gap-1">
-                    Cash Flow Integrity (CFO/NI)
-                    <span className="echo-tooltip"><HelpCircle size={10} /><span className="echo-tooltiptext">Operating cash flow divided by net profits. Target: &gt;1.0. Checks if net income is backed by cash, avoiding paper tricks.</span></span>
-                  </span>
-                  <span className="font-bold text-white">{activeAnalysis.detailedIndicators.fundamentals.cfo_to_net_income.toFixed(2)}x</span>
-                </div>
-                
-                <div className="pt-3 border-t border-[#1b1e28] flex justify-between items-center font-bold">
-                  <span className="text-slate-400">Audit Scorecard</span>
-                  <span className="bg-blue-500/10 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded text-[10px]">
-                    {activeAnalysis.detailedIndicators.buffett_scorecard.verdict} ({activeAnalysis.detailedIndicators.buffett_scorecard.score}/5)
-                  </span>
+                <div className={`p-4 rounded border flex flex-col justify-between ${getTimingBadgeColor(activeAnalysis.timingStatus)}`}>
+                  <div className="flex justify-between items-start">
+                    <span className="text-[9px] uppercase font-bold tracking-wider">Entry Timing</span>
+                    <Clock size={12} />
+                  </div>
+                  <div className="mt-2">
+                    <div className="text-base font-black tracking-tight">{activeAnalysis.timingStatus}</div>
+                    <p className="text-[10px] opacity-80 mt-1 leading-relaxed">{activeAnalysis.timingDescription || "Run a committee analysis to fetch fresh entry signals."}</p>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Benjamin Graham Intrinsic Value panel */}
-            <div className="glass-panel p-5 relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500" />
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <Percent className="text-emerald-500" size={14} />
-                  <span>Graham Value & Margin of Safety</span>
-                </span>
-                <span className="echo-tooltip">
-                  <HelpCircle size={12} className="text-slate-500" />
-                  <span className="echo-tooltiptext">
-                    Calculates Intrinsic Value using Benjamin Graham's formula. Safe entry window occurs when stock trades &ge;30% below intrinsic value.
-                  </span>
-                </span>
-              </h3>
-
-              <div className="space-y-2.5 text-xs">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400 flex items-center gap-1">
-                    Intrinsic Value (Graham Formula)
-                    <span className="echo-tooltip"><HelpCircle size={10} /><span className="echo-tooltiptext">Calculated using EPS, historical growth, and corporate bond yields.</span></span>
-                  </span>
-                  <span className="font-bold text-emerald-400">₹{activeAnalysis.intrinsicValue.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Current Market Price</span>
-                  <span className="font-bold text-white">₹{activeAnalysis.currentPrice.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Margin of Safety</span>
-                  <span className={`font-bold ${activeAnalysis.marginOfSafety >= 0.3 ? "text-emerald-400" : "text-slate-300"}`}>
-                    {(activeAnalysis.marginOfSafety * 100).toFixed(1)}%
-                  </span>
-                </div>
+              {/* Real historical price and simulator charts */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 
-                <div className={`mt-6 p-3 rounded-lg border flex items-center space-x-2.5 ${activeAnalysis.isUndervalued ? "bg-emerald-950/25 border-emerald-500/20 text-emerald-300" : "bg-slate-800/20 border-slate-700/40 text-slate-400"}`}>
-                  {activeAnalysis.isUndervalued ? (
-                    <>
-                      <CheckCircle className="text-emerald-400 flex-shrink-0" size={16} />
-                      <div className="text-[10px] leading-normal font-semibold">
-                        <span className="font-bold text-white block">Value Approved</span>
-                        <span>Stock trades below intrinsic valuation with safety buffer intact.</span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <AlertTriangle className="text-yellow-500 flex-shrink-0" size={16} />
-                      <div className="text-[10px] leading-normal font-semibold">
-                        <span className="font-bold text-slate-300 block">Premium Valuation</span>
-                        <span>Trades above Graham intrinsic margin of safety. Premium priced.</span>
-                      </div>
-                    </>
+                {/* Close Price + Delivery Volume */}
+                <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center justify-between">
+                    <span>100-Day Price & Delivery Volume (Unmocked)</span>
+                    {historyLoading && <Loader2 size={12} className="animate-spin text-purple-400" />}
+                  </h3>
+                  
+                  <div className="h-56 w-full">
+                    {historicalData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={historicalData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+                          <defs>
+                            <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.2}/>
+                              <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/>
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#161a24" />
+                          <XAxis dataKey="day" stroke="#475569" style={{ fontSize: 9, fontWeight: "bold" }} />
+                          <YAxis stroke="#475569" domain={["auto", "auto"]} style={{ fontSize: 9, fontWeight: "bold" }} />
+                          <ChartTooltip contentStyle={{ backgroundColor: "#0b0d12", border: "1px solid #161a23" }} />
+                          <Area type="monotone" dataKey="price" stroke="#8b5cf6" strokeWidth={2} fillOpacity={1} fill="url(#colorPrice)" />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-xs text-slate-500 italic">No price history found.</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Real Kronos AutoRegressive Projections */}
+                <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center justify-between">
+                    <span>Kronos Neural Monte Carlo Projections (Unmocked)</span>
+                    {simLoading && <Loader2 size={12} className="animate-spin text-purple-400" />}
+                  </h3>
+                  
+                  <div className="h-56 w-full">
+                    {projectionData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={projectionData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#161a24" />
+                          <XAxis dataKey="step" stroke="#475569" style={{ fontSize: 9, fontWeight: "bold" }} />
+                          <YAxis stroke="#475569" domain={["auto", "auto"]} style={{ fontSize: 9, fontWeight: "bold" }} />
+                          <ChartTooltip contentStyle={{ backgroundColor: "#0b0d12", border: "1px solid #161a23" }} />
+                          <Line type="monotone" dataKey="pathA" stroke="#10b981" strokeWidth={1.5} dot={false} name="Path A (Optimistic)" />
+                          <Line type="monotone" dataKey="pathB" stroke="#8b5cf6" strokeWidth={1.5} dot={false} name="Path B (Neutral)" />
+                          <Line type="monotone" dataKey="pathC" stroke="#f59e0b" strokeWidth={1.5} dot={false} name="Path C (Pessimistic)" />
+                          <Legend wrapperStyle={{ fontSize: 9, fontWeight: "bold", paddingTop: 10 }} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-xs text-slate-500 italic">No simulations loaded. Run analysis above.</div>
+                    )}
+                  </div>
+                  {projectionData.length > 0 && (
+                    <div className="flex justify-between items-center mt-3 text-[10px] bg-[#0c0e14] p-2.5 rounded border border-[#1a1f2c] font-bold">
+                      <span className="text-slate-400">Projected Upside Prob: <strong className="text-white">{(simulationStats.upsideProb * 100).toFixed(1)}%</strong></span>
+                      <span className="text-slate-400">Risk Variance (Vol): <strong className="text-white">{(simulationStats.volRisk * 100).toFixed(1)}%</strong></span>
+                      <span className={simulationStats.isSafe ? "text-emerald-400" : "text-amber-500"}>{simulationStats.isSafe ? "✓ Low Risk Boundary" : "⚠ Extreme Risk Variance"}</span>
+                    </div>
+                  )}
+                </div>
+
+              </div>
+
+              {/* Buffett Quality + Graham Intrinsic Value + Weinstein Momentum */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                
+                {/* Buffett Audit */}
+                <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg relative overflow-hidden backdrop-blur-md">
+                  <div className="absolute top-0 left-0 w-1 h-full bg-blue-500" />
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5"><Database className="text-blue-500" size={12} />Warren Buffett Quality Audit</span>
+                  </h3>
+                  <div className="space-y-3 text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Moat rating</span>
+                      <span className="font-bold text-blue-400">{activeAnalysis.moatRating}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Derived ROCE</span>
+                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators.fundamentals.roce * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Derived ROE</span>
+                      <span className="font-bold text-white">{(activeAnalysis.detailedIndicators.fundamentals.roe * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Debt-to-Equity</span>
+                      <span className="font-bold text-white">{activeAnalysis.detailedIndicators.fundamentals.debt_to_equity.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Cash Flow Integrity</span>
+                      <span className="font-bold text-white">{activeAnalysis.detailedIndicators.fundamentals.cfo_to_net_income.toFixed(2)}x</span>
+                    </div>
+                    <div className="pt-3 border-t border-[#1a1f2c] flex justify-between items-center font-bold">
+                      <span className="text-slate-400">Verdict</span>
+                      <span className="bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded text-[10px]">
+                        {activeAnalysis.detailedIndicators.buffett_scorecard.verdict} ({activeAnalysis.detailedIndicators.buffett_scorecard.score}/5)
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Graham Valuation */}
+                <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg relative overflow-hidden backdrop-blur-md">
+                  <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500" />
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5"><Percent className="text-emerald-500" size={12} />Benjamin Graham Intrinsic Value</span>
+                  </h3>
+                  <div className="space-y-3 text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Intrinsic Value</span>
+                      <span className="font-bold text-emerald-400">₹{activeAnalysis.intrinsicValue.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Current Price</span>
+                      <span className="font-bold text-white">₹{activeAnalysis.currentPrice.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Margin of Safety</span>
+                      <span className={`font-bold ${activeAnalysis.marginOfSafety >= 0.3 ? "text-emerald-400" : "text-slate-300"}`}>
+                        {(activeAnalysis.marginOfSafety * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className={`mt-5 p-3 rounded border flex items-center space-x-2.5 ${activeAnalysis.isUndervalued ? "bg-emerald-950/20 border-emerald-500/20 text-emerald-300" : "bg-slate-900/40 border-[#1a1f2c] text-slate-400"}`}>
+                      {activeAnalysis.isUndervalued ? (
+                        <>
+                          <CheckCircle className="text-emerald-400 flex-shrink-0" size={14} />
+                          <div className="text-[10px] leading-normal font-bold">
+                            <span className="text-white block">Value Approved</span>
+                            Trades below intrinsic valuation buffer.
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="text-amber-500 flex-shrink-0" size={14} />
+                          <div className="text-[10px] leading-normal font-bold">
+                            <span className="text-slate-300 block">Premium Price</span>
+                            Trades above Graham intrinsic margin of safety.
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Weinstein & CANSLIM */}
+                <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg relative overflow-hidden backdrop-blur-md">
+                  <div className="absolute top-0 left-0 w-1 h-full bg-purple-500" />
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5"><TrendingUp className="text-purple-500" size={12} />Weinstein & CANSLIM Momentum</span>
+                  </h3>
+                  <div className="space-y-3 text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Weinstein Stage</span>
+                      <span className="font-bold text-purple-400">{activeAnalysis.weinsteinStage}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Trend Score</span>
+                      <span className="font-bold text-white">{activeAnalysis.weinsteinScore.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">CANSLIM Checklist Rating</span>
+                      <span className="font-bold text-white">{activeAnalysis.canslimScore.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Breakout Volume</span>
+                      <span className="font-bold text-white">{activeAnalysis.detailedIndicators.technical.sma_150 > 0 ? "SMA-150 Slope check OK" : "N/A"}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">SMC Liquidity Sweeps</span>
+                      <span className="font-bold text-white">{activeAnalysis.detailedIndicators.technical.sweeps.length} Detected</span>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Lower Section: Real-time Committee Reasoning Logs */}
+              <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg flex flex-col h-[340px] backdrop-blur-md">
+                <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-3 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5"><FileSpreadsheet className="text-purple-500" size={12} />Committee Reasoning Log Stream</span>
+                  <span className={`px-2 py-0.5 rounded font-black text-[9px] uppercase border ${
+                    activeAnalysis.executionStatus === "trade_executed" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                    activeAnalysis.executionStatus === "trade_aborted" ? "bg-red-500/10 text-red-400 border-red-500/20" :
+                    activeAnalysis.executionStatus === "re_planning_active" ? "bg-amber-500/10 text-amber-400 border-amber-500/20" : "bg-slate-800 text-slate-400 border-slate-700"
+                  }`}>
+                    {activeAnalysis.executionStatus.replace("_", " ")}
+                  </span>
+                </h3>
+
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1 select-text font-mono text-[10px] text-slate-300 custom-scrollbar">
+                  {logs.map((log, idx) => (
+                    <div 
+                      key={idx} 
+                      className={`p-2 rounded border ${
+                        log.includes("CRITICAL") || log.includes("rejected") || log.includes("block") || log.includes("aborted") ? "bg-red-950/20 border-red-500/10 text-red-300" :
+                        log.includes("Approved") || log.includes("Success") || log.includes("complete") || log.includes("executed") ? "bg-emerald-950/20 border border-emerald-500/10 text-emerald-400" :
+                        log.includes("WARNING") || log.includes("halted") ? "bg-amber-950/20 border border-amber-500/10 text-amber-400" :
+                        "bg-[#07080a]/40 border-[#151922]"
+                      }`}
+                    >
+                      {log}
+                    </div>
+                  ))}
+                  {loading && (
+                    <div className="flex items-center space-x-2 p-2 text-slate-400 italic">
+                      <Loader2 size={12} className="animate-spin text-purple-400" />
+                      <span>Running multi-agent committee...</span>
+                    </div>
+                  )}
+                  {!loading && logs.length === 0 && (
+                    <div className="text-slate-500 text-center py-20 italic">
+                      Pipeline idle. Search a stock or select from candidates to trigger committee decision.
+                    </div>
                   )}
                 </div>
               </div>
-            </div>
 
-            {/* Stan Weinstein & O'Neil Momentum panel */}
-            <div className="glass-panel p-5 relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-1 h-full bg-[#9c27b0]" />
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <TrendingUp className="text-[#9c27b0]" size={14} />
-                  <span>Weinstein & CANSLIM Momentum</span>
-                </span>
-                <span className="echo-tooltip">
-                  <HelpCircle size={12} className="text-slate-500" />
-                  <span className="echo-tooltiptext">
-                    Analyzes price stage, volume breakouts, relative strength index, and institutional flows. Stage 2 breakout indicates high probability uptrend markup.
-                  </span>
-                </span>
-              </h3>
-
-              <div className="space-y-2.5 text-xs">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Weinstein Stage Status</span>
-                  <span className="font-bold text-[#9c27b0] text-[11px]">{activeAnalysis.weinsteinStage}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400 flex items-center gap-1">
-                    Weinstein Trend Score
-                    <span className="echo-tooltip"><HelpCircle size={10} /><span className="echo-tooltiptext">Combines price location, SMA slope, and breakout volumes. Target: &gt;0.70.</span></span>
-                  </span>
-                  <span className="font-bold text-white">{activeAnalysis.weinsteinScore.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400 flex items-center gap-1">
-                    O'Neil CANSLIM score
-                    <span className="echo-tooltip"><HelpCircle size={10} /><span className="echo-tooltiptext">O'Neil growth & momentum checklist rating. Target: &gt;0.60.</span></span>
-                  </span>
-                  <span className="font-bold text-white">{activeAnalysis.canslimScore.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Breakout Volume Ratio</span>
-                  <span className="font-bold text-white">2.45x (Avg)</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Relative Strength (vs Nifty)</span>
-                  <span className="font-bold text-[#00ff88]">Strong Outperformer</span>
-                </div>
-              </div>
-            </div>
-
+            </main>
           </div>
+        )}
 
-          {/* LOWER GRID: SENTIMENT, TRANSCRIPT DIVERGENCE, ORDER BOOK & COMPLIANCE */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* TAB 2: CONVICTION MATRIX LEADERBOARD */}
+        {activeTab === "conviction" && (
+          <div className="space-y-6">
             
-            {/* Earnings transcript Q&A sentiment divergence */}
-            <div className="glass-panel p-5 relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-1 h-full bg-[#ef4444]" />
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <FileText className="text-[#ef4444]" size={14} />
-                  <span>Unscripted Q&A Tone Divergence</span>
-                </span>
-                <span className="echo-tooltip">
-                  <HelpCircle size={12} className="text-slate-500" />
-                  <span className="echo-tooltiptext">
-                    Compares scripted remarks sentiment against unscripted analyst Q&A session. High divergence indicates management evasiveness or guidance hiding.
-                  </span>
-                </span>
-              </h3>
-
-              <div className="space-y-3.5 text-xs">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Prepared Remarks Tone</span>
-                  <span className="font-bold text-[#00ff88]">0.85 (Bullish)</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Analyst Q&A Session Tone</span>
-                  <span className="font-bold text-yellow-400">0.73 (Moderate)</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Tone Divergence Rating</span>
-                  <span className={`font-bold ${activeAnalysis.unscriptedDivergence > 0.3 ? "text-red-400" : "text-[#00ff88]"}`}>
-                    {activeAnalysis.unscriptedDivergence} (Low Risk)
-                  </span>
-                </div>
-
-                <div className="p-3 bg-slate-800/10 rounded-lg border border-slate-700/30 text-[10px] text-slate-400">
-                  <span className="font-bold text-white block uppercase text-[8px] tracking-wider mb-1">Evasive Keywords Scanned</span>
-                  "supply chain bottlenecks", "cautious outlook", "uncertain demand headwinds"
-                </div>
-              </div>
-            </div>
-
-            {/* Level 2 depth Order Book surveillance */}
-            <div className="glass-panel p-5 relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-1 h-full bg-violet-500" />
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <Cpu className="text-violet-500" size={14} />
-                  <span>Order Book Imbalance (WOFI)</span>
-                </span>
-                <span className="echo-tooltip">
-                  <HelpCircle size={12} className="text-slate-500" />
-                  <span className="echo-tooltiptext">
-                    Weighted Order Flow Imbalance. Positive value indicates heavy resting buy order walls supporting price. Negative value indicates overhead supply.
-                  </span>
-                </span>
-              </h3>
-
-              <div className="space-y-3 text-xs">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Imbalance (WOFI) Score</span>
-                  <span className={`font-bold ${activeAnalysis.wofiScore > 0 ? "text-[#00ff88]" : "text-red-400"}`}>
-                    {activeAnalysis.wofiScore > 0 ? "+" : ""}{activeAnalysis.wofiScore.toFixed(2)}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Iceberg Order Refreshes</span>
-                  <span className={`font-bold ${activeAnalysis.icebergDetected ? "text-[#00ff88] animate-pulse" : "text-slate-500"}`}>
-                    {activeAnalysis.icebergDetected ? "Active Buyer Accumulating" : "None Detected"}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Spoofing limit walls</span>
-                  <span className={`font-bold ${activeAnalysis.spoofingDetected ? "text-red-400 animate-pulse" : "text-[#00ff88]"}`}>
-                    {activeAnalysis.spoofingDetected ? "Alert: Fake liquidity walls" : "Clear (No Spoofing)"}
-                  </span>
-                </div>
-
-                {/* Micro Bid/Ask Depth ladder */}
-                <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-[#1b1e28] text-[9px] font-bold">
-                  <div className="bg-[#00ff88]/5 p-1.5 rounded border border-[#00ff88]/10 text-center">
-                    <span className="text-slate-500 block uppercase font-black">Bids (Buying)</span>
-                    <span className="text-[#00ff88] text-[10px]">₹1262.50 // 12,450 sh</span>
-                  </div>
-                  <div className="bg-red-500/5 p-1.5 rounded border border-red-500/10 text-center">
-                    <span className="text-slate-500 block uppercase font-black">Asks (Selling)</span>
-                    <span className="text-red-400 text-[10px]">₹1263.10 // 4,100 sh</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* SEBI Compliance & Surveillance */}
-            <div className="glass-panel p-5 relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-1 h-full bg-orange-500" />
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-4 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <ShieldAlert className="text-orange-500" size={14} />
-                  <span>SEBI 2026 Algorithmic Compliance</span>
-                </span>
-                <span className="echo-tooltip">
-                  <HelpCircle size={12} className="text-slate-500" />
-                  <span className="echo-tooltiptext">
-                    Verifies compliance with SEBI 2026 regulations (OPS rate limiter, static IP validation, and Market Price Protection limit order execution).
-                  </span>
-                </span>
-              </h3>
-
-              <div className="space-y-3 text-xs">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Surveillance Stage</span>
-                  <span className={`font-bold ${activeAnalysis.isBlocked ? "text-red-400 animate-pulse" : "text-[#00ff88]"}`}>
-                    {activeAnalysis.isBlocked ? "SEBI Block Active" : "Approved for Trading"}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Order Rate Limiter</span>
-                  <span className="font-bold text-white">0.00 / 9.00 OPS</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Market Price Protection</span>
-                  <span className="font-bold text-[#00ff88]">Active (Limit-Only orders)</span>
-                </div>
-
-                {activeAnalysis.isBlocked ? (
-                  <div className="p-2.5 bg-red-950/20 border border-red-500/20 text-red-300 text-[10px] leading-normal rounded">
-                    <strong>Surveillance Flag Triggered:</strong> {activeAnalysis.surveillanceReasons.join(" ")}
-                  </div>
-                ) : (
-                  <div className="p-2.5 bg-[#00ff88]/5 border border-[#00ff88]/15 text-[#00ff88] text-[10px] leading-normal rounded">
-                    <strong>Regulatory Clearance:</strong> This ticker is clean of additional surveillance measures. Capital deployment approved.
-                  </div>
-                )}
-              </div>
-            </div>
-
-          </div>
-
-          {/* LOWER ROW: STREAM LOGS & SIMULATED POSITIONS LEDGER */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            
-            {/* Stream Logs */}
-            <div className="glass-panel p-5 h-[340px] flex flex-col lg:col-span-1">
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-3 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <FileSpreadsheet className="text-[#9c27b0]" size={14} />
-                  <span>Committee Reasoning Stream</span>
-                </span>
-              </h3>
-              
-              {/* Transition path status */}
-              <div className="flex items-center justify-between text-[10px] bg-[#0b0c10]/80 p-2.5 rounded-lg border border-[#1b1e28] mb-3">
-                <span className="text-slate-400 font-bold uppercase tracking-wider">Engine Process Status</span>
-                <span className={`px-2 py-0.5 rounded font-black uppercase tracking-wider text-[9px] ${
-                  activeAnalysis.executionStatus === "trade_executed" ? "bg-[#00ff88]/10 text-[#00ff88] border border-[#00ff88]/20" :
-                  activeAnalysis.executionStatus === "trade_aborted" ? "bg-red-500/10 text-red-400 border border-red-500/20" :
-                  activeAnalysis.executionStatus === "re_planning_active" ? "bg-[#e2ba34]/10 text-[#e2ba34] border border-[#e2ba34]/20" : "bg-slate-800 text-slate-400"
-                }`}>
-                  {activeAnalysis.executionStatus.replace("_", " ")}
-                </span>
+            {/* Lead board matrix */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+              <div className="flex justify-between items-center border-b border-[#1b212f] pb-3 mb-4">
+                <h2 className="text-xs font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <Flame className="text-purple-500" size={14} />
+                  <span>0-100 Conviction Matrix Leaderboard</span>
+                </h2>
+                <button 
+                  onClick={() => runOperation("scoring", "/api/conviction/run")}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded text-[10px] font-bold flex items-center gap-1"
+                >
+                  <Play size={10} />
+                  Run Scoring Job
+                </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1 select-text font-mono text-[10px] text-slate-300">
-                {logs.map((log, idx) => (
-                  <div 
-                    key={idx} 
-                    className={`p-2 rounded border ${
-                      log.includes("CRITICAL") || log.includes("rejected") || log.includes("block") ? "bg-red-950/20 border-red-500/10 text-red-300" :
-                      log.includes("Approved") || log.includes("Success") || log.includes("complete") ? "bg-[#00ff88]/5 border border-[#00ff88]/10 text-[#00ff88]" :
-                      log.includes("WARNING") ? "bg-[#e2ba34]/5 border border-[#e2ba34]/10 text-[#e2ba34]" :
-                      "bg-[#0b0c10]/40 border-[#1b1e28]"
-                    }`}
-                  >
-                    {log}
-                  </div>
-                ))}
-                {loading && (
-                  <div className="flex items-center space-x-2 p-2 text-slate-400 italic">
-                    <Loader2 size={12} className="animate-spin text-[#a855f7]" />
-                    <span>Orchestrating state nodes...</span>
-                  </div>
-                )}
-                {!loading && logs.length === 0 && (
-                  <div className="text-slate-500 text-center py-20 italic">
-                    Pipeline idle. Select a screened breakout or execute analysis.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Paper Trading Ledger Table */}
-            <div className="glass-panel p-5 h-[340px] flex flex-col lg:col-span-2">
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b1e28] pb-3 mb-3 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <Briefcase className="text-[#00ff88]" size={14} />
-                  <span>Simulated Paper-Trading Ledger (Capital Preservation)</span>
-                </span>
-              </h3>
-
-              <div className="flex-1 overflow-y-auto custom-scrollbar">
+              <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
-                    <tr className="border-b border-[#1d212d] text-slate-400 font-bold uppercase tracking-widest text-[9px] pb-2">
-                      <th className="py-2.5">Ticker</th>
-                      <th>Avg. Buy Price</th>
-                      <th>Last Price</th>
-                      <th>Quantity</th>
-                      <th>Stop Floor</th>
-                      <th>Simulated PnL</th>
-                      <th className="text-right">Ledger Status</th>
+                    <tr className="border-b border-[#1a1f2c] text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+                      <th className="py-3 px-3">Ticker</th>
+                      <th>Conviction Score</th>
+                      <th>Technicals (+30)</th>
+                      <th>Smart Money (+30)</th>
+                      <th>Thematic (+20)</th>
+                      <th>Fundamentals (+20)</th>
+                      <th>Trap Penalty (-50)</th>
+                      <th>Verdict</th>
+                      <th className="text-right px-3">Last Scored</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-[#1b1e28]/40">
-                    {positions.map((pos, idx) => (
-                      <tr key={idx} className="hover:bg-slate-800/10 font-bold text-slate-200">
-                        <td className="py-3 text-white">{pos.ticker}</td>
-                        <td>₹{pos.buyPrice.toFixed(2)}</td>
-                        <td>₹{pos.currentPrice.toFixed(2)}</td>
-                        <td>{pos.size} sh</td>
-                        <td className="text-red-400">₹{pos.stopLoss.toFixed(2)}</td>
-                        <td className={pos.pnl >= 0 ? "text-[#00ff88]" : "text-red-400"}>
-                          ₹{pos.pnl >= 0 ? "+" : ""}{pos.pnl.toFixed(2)}
-                        </td>
-                        <td className="text-right">
-                          <span className="bg-[#00ff88]/15 text-[#00ff88] border border-[#00ff88]/30 px-2.5 py-0.5 rounded font-black text-[9px] uppercase">
-                            {pos.status}
+                  <tbody className="divide-y divide-[#161a23]/60">
+                    {convictionList.map((row, idx) => (
+                      <tr 
+                        key={idx} 
+                        onClick={() => handleSelectCandidate(row.symbol)}
+                        className="hover:bg-slate-800/10 font-bold text-slate-200 cursor-pointer"
+                      >
+                        <td className="py-3 px-3 text-white">{row.symbol}</td>
+                        <td>
+                          <span className={`px-2 py-0.5 rounded font-black ${
+                            row.conviction_score >= 75 ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20" :
+                            row.conviction_score >= 50 ? "bg-cyan-500/15 text-cyan-400 border border-cyan-500/20" :
+                            "bg-slate-800 text-slate-400"
+                          }`}>
+                            {row.conviction_score}/100
                           </span>
+                        </td>
+                        <td className="text-purple-400">+{row.technical_score}</td>
+                        <td className="text-emerald-400">+{row.smart_money_score}</td>
+                        <td className="text-blue-400">+{row.thematic_score}</td>
+                        <td className="text-cyan-400">+{row.fundamental_score}</td>
+                        <td className="text-red-400">-{row.trap_score || row.trap_penalty || 0}</td>
+                        <td>
+                          <span className="text-[11px] truncate block max-w-xs">{row.verdict}</span>
+                        </td>
+                        <td className="text-right px-3 text-slate-500 text-[10px]">
+                          {new Date(row.updated_at).toLocaleString("en-IN")}
                         </td>
                       </tr>
                     ))}
-                    {positions.length === 0 && (
+                    {convictionLoading && (
                       <tr>
-                        <td colSpan={7} className="text-slate-500 text-center py-12 italic">
-                          No active paper transactions placed.
+                        <td colSpan={9} className="py-12 text-center text-slate-400">
+                          <Loader2 size={20} className="animate-spin inline mr-2 text-purple-400" />
+                          <span>Loading conviction leaderboard...</span>
+                        </td>
+                      </tr>
+                    )}
+                    {!convictionLoading && convictionList.length === 0 && (
+                      <tr>
+                        <td colSpan={9} className="py-12 text-center text-slate-500 italic">
+                          Leaderboard empty. Trigger a manual scoring run using the button above or Operations panel.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Active overrides list */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+              <h2 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center gap-1.5">
+                <ShieldAlert className="text-amber-500" size={14} />
+                <span>Active News Conviction Overrides (Tier 2 / Tier 3 Auto-Adjustments)</span>
+              </h2>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[#1a1f2c] text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+                      <th className="py-3 px-3">Ticker</th>
+                      <th>Adjustment points</th>
+                      <th>Override Source</th>
+                      <th>Reasoning Catalyst</th>
+                      <th className="text-right px-3">Auto-Expires At</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#161a23]/60">
+                    {activeOverrides.map((row, idx) => (
+                      <tr key={idx} className="font-bold text-slate-200">
+                        <td className="py-3 px-3 text-white">{row.symbol}</td>
+                        <td>
+                          <span className={`px-2 py-0.5 rounded font-black ${
+                            row.override_points > 0 ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-red-500/10 text-red-400 border border-red-500/20"
+                          }`}>
+                            {row.override_points > 0 ? `+${row.override_points}` : row.override_points}
+                          </span>
+                        </td>
+                        <td className="text-purple-400">{row.source}</td>
+                        <td className="max-w-md truncate text-slate-300">{row.reason}</td>
+                        <td className="text-right px-3 text-slate-500">
+                          {new Date(row.expires_at).toLocaleString("en-IN")}
+                        </td>
+                      </tr>
+                    ))}
+                    {activeOverrides.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="py-8 text-center text-slate-500 italic">
+                          No active score overrides present. Trigger news pipeline in Operations.
                         </td>
                       </tr>
                     )}
@@ -901,19 +1095,638 @@ export default function App() {
             </div>
 
           </div>
+        )}
 
-        </main>
+        {/* TAB 3: THREE-TIER NEWS SIGNALS */}
+        {activeTab === "news" && (
+          <div className="space-y-6">
+            
+            {/* Top Catalysts & Override Events */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              
+              <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg lg:col-span-2 backdrop-blur-md">
+                <div className="flex justify-between items-center border-b border-[#1b212f] pb-3 mb-4">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                    <Newspaper className="text-purple-500" size={14} />
+                    <span>Material Catalysts / Order Wins Scraped (Last 24 Hours)</span>
+                  </h3>
+                  <button 
+                    onClick={() => runOperation("news", "/api/news/pipeline")}
+                    className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-[10px] font-bold flex items-center gap-1"
+                  >
+                    <Play size={10} />
+                    Run News Pipeline
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  {materialCatalysts.map((c, idx) => (
+                    <div key={idx} className="bg-[#07080a]/60 border border-[#1a1f2c] p-3 rounded flex justify-between items-center gap-4 hover:border-slate-600 transition-all duration-200">
+                      <div>
+                        <div className="flex items-center space-x-2">
+                          <span className="font-extrabold text-white text-xs">{c.symbol}</span>
+                          <span className="bg-purple-500/10 text-purple-400 text-[9px] font-black border border-purple-500/25 px-1.5 py-0.5 rounded">{c.event_type}</span>
+                          <span className="text-[10px] text-slate-500">{new Date(c.processed_at).toLocaleTimeString("en-IN")}</span>
+                        </div>
+                        <p className="text-xs text-slate-300 font-bold mt-1.5">{c.llm_summary || c.source_title}</p>
+                      </div>
+
+                      <div className="text-right">
+                        <span className={`px-2.5 py-1 rounded text-xs font-black border block ${
+                          c.conviction_adjustment > 0 ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : "bg-red-500/10 text-red-400 border-red-500/20"
+                        }`}>
+                          {c.conviction_adjustment > 0 ? `+${c.conviction_adjustment}` : c.conviction_adjustment} pts
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                  {materialCatalysts.length === 0 && (
+                    <div className="text-slate-500 text-center py-16 italic text-xs">
+                      No material catalysts identified in the last 24 hours. Run news pipeline manually to scrape.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Tier 1 Sector Adjustments */}
+              <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+                <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center gap-1.5">
+                  <Globe className="text-purple-500" size={12} />
+                  <span>Macro Sector Adjustments (Tier 1)</span>
+                </h3>
+
+                <div className="space-y-2.5">
+                  {newsSignals.filter(s => s.tier === 1).map((s, idx) => (
+                    <div key={idx} className="bg-[#07080a]/60 border border-[#1a1f2c] p-2.5 rounded text-xs font-semibold hover:border-slate-600 transition-all duration-200">
+                      <div className="flex justify-between items-center font-bold">
+                        <span className="text-purple-400">{s.theme.replace("_", " ")}</span>
+                        <span className={s.sentiment === "BULLISH" ? "text-emerald-400" : s.sentiment === "BEARISH" ? "text-red-400" : "text-slate-400"}>
+                          {s.sentiment}
+                        </span>
+                      </div>
+                      <p className="text-slate-300 mt-1 text-[11px] font-bold">{s.llm_summary}</p>
+                      <div className="flex justify-between items-center mt-2 text-[10px] text-slate-500">
+                        <span>Sectors: {s.affected_sectors.join(", ")}</span>
+                        <span className="font-black text-white">{s.conviction_adjustment > 0 ? "+" : ""}{s.conviction_adjustment} pts</span>
+                      </div>
+                    </div>
+                  ))}
+                  {newsSignals.filter(s => s.tier === 1).length === 0 && (
+                    <div className="text-slate-500 text-center py-16 italic text-xs">
+                      No macro sector signals ingested today.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+            </div>
+
+            {/* General News Signals List */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center gap-1.5">
+                <FileSpreadsheet className="text-purple-500" size={14} />
+                <span>All Processed Signals (Chronological Feed)</span>
+              </h3>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[#1a1f2c] text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+                      <th className="py-3 px-3">Tier</th>
+                      <th>Ticker/Query</th>
+                      <th>Original Source/Title</th>
+                      <th>Event Type / Theme</th>
+                      <th>Sentiment</th>
+                      <th>Adjustment</th>
+                      <th className="text-right px-3">Processed Time</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#161a23]/60">
+                    {newsSignals.map((row, idx) => (
+                      <tr key={idx} className="font-bold text-slate-200">
+                        <td className="py-3 px-3 text-slate-400">Tier {row.tier}</td>
+                        <td className="text-white">{row.symbol || row.query}</td>
+                        <td className="max-w-sm truncate text-slate-300" title={row.source_title}>{row.source_title || "-"}</td>
+                        <td>
+                          <span className="bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded text-[10px] font-black border border-purple-500/20">{row.event_type || row.theme || "Generic"}</span>
+                        </td>
+                        <td className={row.sentiment === "BULLISH" || row.sentiment === "Bullish" ? "text-emerald-400" : row.sentiment === "BEARISH" || row.sentiment === "Bearish" ? "text-red-400" : "text-slate-400"}>
+                          {row.sentiment}
+                        </td>
+                        <td className={row.conviction_adjustment > 0 ? "text-emerald-400" : row.conviction_adjustment < 0 ? "text-red-400" : "text-slate-500"}>
+                          {row.conviction_adjustment > 0 ? `+${row.conviction_adjustment}` : row.conviction_adjustment}
+                        </td>
+                        <td className="text-right px-3 text-slate-500 text-[10px]">
+                          {new Date(row.processed_at).toLocaleString("en-IN")}
+                        </td>
+                      </tr>
+                    ))}
+                    {newsLoading && (
+                      <tr>
+                        <td colSpan={7} className="py-12 text-center text-slate-400">
+                          <Loader2 size={16} className="animate-spin inline mr-2 text-purple-400" />
+                          Loading signals feed...
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* TAB 4: SECTOR HEATMAP & INSIDERS FEED */}
+        {activeTab === "sectors" && (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+            
+            {/* Sector Heatmap */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+              <div className="flex justify-between items-center border-b border-[#1b212f] pb-3 mb-4">
+                <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <Globe className="text-purple-500" size={14} />
+                  <span>Sector Rotation Momentum Heatmap (Relative strength vs Nifty 50)</span>
+                </h3>
+                <button 
+                  onClick={() => runOperation("sectors", "/api/sectors/refresh")}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-[10px] font-bold flex items-center gap-1"
+                >
+                  <Play size={10} />
+                  Refresh Momentum
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                {sectorHeatmap.map((row, idx) => (
+                  <div key={idx} className="bg-[#07080a]/60 border border-[#1a1f2c] p-3.5 rounded flex justify-between items-center hover:border-slate-600 transition-all duration-200">
+                    <div>
+                      <div className="font-extrabold text-white text-xs">{row.sector_name}</div>
+                      <span className="text-[10px] text-slate-500">{row.index_symbol}</span>
+                      <div className="text-[10px] text-slate-400 mt-2">RS Score: <strong className="text-white">{row.rs_score}</strong></div>
+                    </div>
+                    <div className="text-right">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-black block border ${getRegimeBadgeColor(row.momentum_regime)}`}>
+                        {row.momentum_regime}
+                      </span>
+                      <span className={`text-[10px] font-bold block mt-1.5 ${row.rs_change_4w >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {row.rs_change_4w >= 0 ? "+" : ""}{(row.rs_change_4w * 100).toFixed(2)}% Δ4W
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                {sectorsLoading && (
+                  <div className="col-span-2 text-center py-12 text-slate-400">
+                    <Loader2 size={16} className="animate-spin inline mr-2 text-purple-400" />
+                    Calculating sector momentum relative strength...
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Insider Disclosures Feed */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+              <div className="flex justify-between items-center border-b border-[#1b212f] pb-3 mb-4">
+                <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <Database className="text-purple-500" size={14} />
+                  <span>NSE SASTI Insider & Promoter Trading Disclosures Feed</span>
+                </h3>
+                <button 
+                  onClick={() => runOperation("insiders", "/api/insiders/crawl")}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-[10px] font-bold flex items-center gap-1"
+                >
+                  <Play size={10} />
+                  Crawl NSE SASTI
+                </button>
+              </div>
+
+              <div className="overflow-x-auto h-[600px] custom-scrollbar">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[#1a1f2c] text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+                      <th className="py-2.5 px-2">Ticker</th>
+                      <th>Acquirer Promoter</th>
+                      <th>Category</th>
+                      <th>Tx Type</th>
+                      <th>Quantity</th>
+                      <th>Value (INR)</th>
+                      <th className="text-right px-2">Trade Date</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#161a23]/60">
+                    {insiderFeed.map((row, idx) => (
+                      <tr 
+                        key={idx} 
+                        onClick={() => handleSelectCandidate(row.symbol)}
+                        className="hover:bg-slate-800/10 font-bold text-slate-200 cursor-pointer"
+                      >
+                        <td className="py-2 px-2 text-white">{row.symbol}</td>
+                        <td className="max-w-[140px] truncate text-slate-300" title={row.acquirer_name}>{row.acquirer_name}</td>
+                        <td className="text-slate-400 text-[10px]">{row.category_of_person || "Promoter"}</td>
+                        <td className={row.transaction_type === "Buy" ? "text-emerald-400" : "text-red-400"}>{row.transaction_type}</td>
+                        <td>{parseInt(row.quantity).toLocaleString("en-IN")} sh</td>
+                        <td className="text-purple-400">₹{parseFloat(row.value_rs || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</td>
+                        <td className="text-right px-2 text-slate-500 text-[10px]">{row.trade_date}</td>
+                      </tr>
+                    ))}
+                    {insiderLoading && (
+                      <tr>
+                        <td colSpan={7} className="py-12 text-center text-slate-400">
+                          <Loader2 size={16} className="animate-spin inline mr-2 text-purple-400" />
+                          Crawling insider disclosures from NSE archives...
+                        </td>
+                      </tr>
+                    )}
+                    {!insiderLoading && insiderFeed.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="py-8 text-center text-slate-500 italic">
+                          Disclosures feed is empty. Click button to crawl NSE SASTI files.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* TAB 5: PRIVATE TRADE JOURNAL LEDGER */}
+        {activeTab === "journal" && (
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+            
+            {/* Journal Table Ledger */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg xl:col-span-2 backdrop-blur-md h-[700px] flex flex-col">
+              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center gap-1.5">
+                <Briefcase className="text-purple-500" size={14} />
+                <span>Simulated Portfolio Trading Log & Realized PnL</span>
+              </h3>
+
+              <div className="flex-1 overflow-y-auto custom-scrollbar">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[#1a1f2c] text-slate-400 font-bold uppercase tracking-wider text-[9px]">
+                      <th className="py-2.5 px-2">Ticker</th>
+                      <th>Entry Date</th>
+                      <th>Entry Price</th>
+                      <th>Qty</th>
+                      <th>Stop Loss</th>
+                      <th>Target</th>
+                      <th>Realized PnL</th>
+                      <th>Status</th>
+                      <th className="text-right px-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#161a23]/60">
+                    {journalEntries.map((row, idx) => (
+                      <tr key={idx} className="font-bold text-slate-200">
+                        <td className="py-3 px-2 text-white">{row.symbol}</td>
+                        <td>{row.entry_date}</td>
+                        <td>₹{parseFloat(row.entry_price).toFixed(2)}</td>
+                        <td>{row.quantity} sh</td>
+                        <td className="text-red-400">₹{parseFloat(row.stop_loss).toFixed(2)}</td>
+                        <td className="text-emerald-400">{row.target_price ? `₹${parseFloat(row.target_price).toFixed(2)}` : "-"}</td>
+                        <td className={row.exit_date ? (parseFloat(row.pnl) >= 0 ? "text-emerald-400" : "text-red-400") : "text-slate-400"}>
+                          {row.exit_date ? `₹${parseFloat(row.pnl).toLocaleString("en-IN", { minimumFractionDigits: 2 })}` : "-"}
+                        </td>
+                        <td>
+                          {row.exit_date ? (
+                            <span className="bg-slate-800 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Closed</span>
+                          ) : (
+                            <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Active</span>
+                          )}
+                        </td>
+                        <td className="text-right px-2">
+                          <div className="flex justify-end items-center gap-1.5">
+                            {row.exit_date === null && (
+                              <button 
+                                onClick={() => {
+                                  setExitForm(prev => ({ ...prev, trade_id: row.id }));
+                                  setShowExitModal(true);
+                                }}
+                                className="bg-purple-600 hover:bg-purple-700 text-white px-2 py-0.5 rounded text-[9px] font-bold"
+                              >
+                                Exit
+                              </button>
+                            )}
+                            <button 
+                              onClick={() => handleDeleteTrade(row.id)}
+                              className="text-slate-500 hover:text-red-400 p-1"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    {journalLoading && (
+                      <tr>
+                        <td colSpan={9} className="py-12 text-center text-slate-400">
+                          <Loader2 size={16} className="animate-spin inline mr-2 text-purple-400" />
+                          Fetching trade ledger...
+                        </td>
+                      </tr>
+                    )}
+                    {journalEntries.length === 0 && (
+                      <tr>
+                        <td colSpan={9} className="py-12 text-center text-slate-500 italic">
+                          Journal is empty. Log a new transaction on the right panel.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Log Trade Entry Form */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md">
+              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center gap-1.5">
+                <Plus className="text-purple-500" size={14} />
+                <span>Log New Swing Transaction</span>
+              </h3>
+
+              <form onSubmit={handleLogTrade} className="space-y-4 text-xs font-bold">
+                <div>
+                  <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Symbol</label>
+                  <input 
+                    type="text" 
+                    className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500 uppercase"
+                    value={journalForm.symbol}
+                    onChange={(e) => setJournalForm(prev => ({ ...prev, symbol: e.target.value }))}
+                    placeholder="e.g. TCS"
+                    required
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Entry Price</label>
+                    <input 
+                      type="number" 
+                      step="any"
+                      className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                      value={journalForm.entry_price}
+                      onChange={(e) => setJournalForm(prev => ({ ...prev, entry_price: e.target.value }))}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Quantity</label>
+                    <input 
+                      type="number" 
+                      className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                      value={journalForm.quantity}
+                      onChange={(e) => setJournalForm(prev => ({ ...prev, quantity: e.target.value }))}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Stop Loss</label>
+                    <input 
+                      type="number" 
+                      step="any"
+                      className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-red-400 focus:outline-none focus:border-red-500"
+                      value={journalForm.stop_loss}
+                      onChange={(e) => setJournalForm(prev => ({ ...prev, stop_loss: e.target.value }))}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Target Price</label>
+                    <input 
+                      type="number" 
+                      step="any"
+                      className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-emerald-400 focus:outline-none focus:border-emerald-500"
+                      value={journalForm.target_price}
+                      onChange={(e) => setJournalForm(prev => ({ ...prev, target_price: e.target.value }))}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Entry Date</label>
+                    <input 
+                      type="date" 
+                      className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                      value={journalForm.entry_date}
+                      onChange={(e) => setJournalForm(prev => ({ ...prev, entry_date: e.target.value }))}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Conviction Score</label>
+                    <input 
+                      type="number" 
+                      min="0"
+                      max="100"
+                      className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                      value={journalForm.conviction_score}
+                      onChange={(e) => setJournalForm(prev => ({ ...prev, conviction_score: e.target.value }))}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Catalyst Setup Notes</label>
+                  <textarea 
+                    rows="2"
+                    className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500 font-medium"
+                    value={journalForm.catalyst}
+                    onChange={(e) => setJournalForm(prev => ({ ...prev, catalyst: e.target.value }))}
+                    placeholder="Weinstein Stage 2 breakout / Promoters buying..."
+                  />
+                </div>
+
+                <button 
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold py-2.5 rounded transition-all duration-200 uppercase tracking-widest text-[10px]"
+                >
+                  Log Transaction
+                </button>
+              </form>
+            </div>
+
+          </div>
+        )}
+
+        {/* TAB 6: SYSTEM OPERATIONS & MANUAL CRON TRIGGER */}
+        {activeTab === "operations" && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+            
+            {/* List of operations/cron jobs */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md space-y-4">
+              <h2 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-2 flex items-center gap-1.5">
+                <Settings className="text-purple-500" size={14} />
+                <span>Manual Cron & Data Crawler Control Board</span>
+              </h2>
+
+              {/* Operations cards */}
+              {[
+                {
+                  key: "nightly",
+                  name: "Full Nightly Sync Pipeline",
+                  endpoint: "/api/jobs/nightly",
+                  desc: "Chains Bhavcopy ingest, Insider disclosure crawl, Sector rotation calculation, and Conviction Score Matrix scoring sequentially. Runs daily at 8:30 PM IST."
+                },
+                {
+                  key: "news",
+                  name: "Three-Tier News Engine Ingestion",
+                  endpoint: "/api/news/pipeline",
+                  desc: "Runs Tier 1 Global Macro searches, Tier 2 corporate filings announcements crawl (NSE API), and Tier 3 watchlist sentiment scans."
+                },
+                {
+                  key: "bhavcopy",
+                  name: "Bhavcopy Ingestion Crawler",
+                  endpoint: "/api/thematic/crawl",
+                  desc: "Downloads latest NSE archives EOD price & deliverable positions report, parsing volumes and delivery percentages."
+                },
+                {
+                  key: "insiders",
+                  name: "Insider SASTI Filings crawler",
+                  endpoint: "/api/insiders/crawl",
+                  desc: "Scrapes official NSE SASTI archives (last 7 days) and ingests promoter buy/sell filings."
+                },
+                {
+                  key: "sectors",
+                  name: "Sector Rotation Refresh",
+                  endpoint: "/api/sectors/refresh",
+                  desc: "Downloads 6-month historical indices closes from yfinance, calculating RS vs Nifty 50 and momentum regimes."
+                },
+                {
+                  key: "scoring",
+                  name: "Conviction Score Matrix recalculator",
+                  endpoint: "/api/conviction/run",
+                  desc: "Scores all constituents 0-100 across Technicals, Delivery Volumes, Themes, Fundamentals and Traps, sending alerts for high-conviction crossovers."
+                }
+              ].map(op => (
+                <div key={op.key} className="bg-[#07080a]/60 border border-[#1a1f2c] p-4 rounded flex flex-col md:flex-row justify-between items-start md:items-center gap-4 hover:border-slate-600 transition-all duration-200">
+                  <div className="max-w-md">
+                    <div className="font-extrabold text-white text-xs">{op.name}</div>
+                    <p className="text-[10px] text-slate-400 mt-1 leading-normal font-medium">{op.desc}</p>
+                    <span className="text-[9px] text-purple-400 block mt-2 font-mono">{op.endpoint}</span>
+                  </div>
+
+                  <div className="flex-shrink-0">
+                    <button 
+                      onClick={() => runOperation(op.key, op.endpoint)}
+                      disabled={runningOperations[op.key]}
+                      className="bg-purple-600 hover:bg-purple-700 text-white font-extrabold px-4 py-2 rounded text-[10px] uppercase tracking-widest disabled:opacity-50 flex items-center space-x-1.5"
+                    >
+                      {runningOperations[op.key] ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <Play size={10} className="fill-current" />
+                      )}
+                      <span>{runningOperations[op.key] ? "Running..." : "Execute"}</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Execution logs terminal */}
+            <div className="bg-[#0b0d12]/50 border border-[#161a23] p-5 rounded-lg backdrop-blur-md flex flex-col h-[700px]">
+              <h2 className="text-xs font-black uppercase tracking-wider text-slate-300 border-b border-[#1b212f] pb-3 mb-4 flex items-center gap-1.5">
+                <FileSpreadsheet className="text-purple-500" size={14} />
+                <span>Live Pipeline Output Logs Terminal</span>
+              </h2>
+
+              <div className="flex-1 bg-[#050608] border border-[#161a23] p-4 rounded font-mono text-[10px] text-slate-300 overflow-y-auto custom-scrollbar select-text space-y-4">
+                {Object.keys(operationLogs).map(key => (
+                  <div key={key} className="border-b border-[#151922] pb-3">
+                    <div className="text-purple-400 font-extrabold uppercase mb-1 tracking-wider text-[9px]">[Operation: {key}]</div>
+                    <pre className="whitespace-pre-wrap leading-relaxed">{operationLogs[key]}</pre>
+                  </div>
+                ))}
+                {Object.keys(operationLogs).length === 0 && (
+                  <div className="text-slate-600 text-center py-40 italic">
+                    Terminal idle. Click "Execute" on any system crawler to inspect the live return values.
+                  </div>
+                )}
+              </div>
+            </div>
+
+          </div>
+        )}
 
       </div>
 
-      {/* FOOTER AUDIT LOG */}
-      <footer className="mt-8 border-t border-[#1b1e28] pt-4 flex flex-col md:flex-row justify-between items-center text-[10px] text-slate-500 font-bold">
+      {/* EXIT TRADE MODAL */}
+      {showExitModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-[#0b0d12] border border-[#1a1f2c] p-5 rounded-lg w-full max-w-sm text-xs font-bold">
+            <h3 className="text-sm font-black text-white border-b border-[#1a1f2c] pb-3 mb-4 uppercase tracking-wider">Log Exit Trade Parameters</h3>
+            
+            <form onSubmit={handleExitTrade} className="space-y-4">
+              <div>
+                <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Exit Price</label>
+                <input 
+                  type="number" 
+                  step="any"
+                  className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                  value={exitForm.exit_price}
+                  onChange={(e) => setExitForm(prev => ({ ...prev, exit_price: e.target.value }))}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Exit Date</label>
+                <input 
+                  type="date" 
+                  className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                  value={exitForm.exit_date}
+                  onChange={(e) => setExitForm(prev => ({ ...prev, exit_date: e.target.value }))}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-400 block mb-1 uppercase tracking-wider text-[10px]">Outcome Notes</label>
+                <textarea 
+                  rows="3"
+                  className="w-full bg-[#07080a] border border-[#232b3c] rounded px-3 py-2 text-white focus:outline-none focus:border-purple-500 font-medium"
+                  value={exitForm.outcome_notes}
+                  onChange={(e) => setExitForm(prev => ({ ...prev, outcome_notes: e.target.value }))}
+                  placeholder="Exit target reached / Trailing stop triggered..."
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button 
+                  type="button"
+                  onClick={() => setShowExitModal(false)}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded uppercase tracking-wider text-[9px]"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit"
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-4 py-2 rounded uppercase tracking-wider text-[9px]"
+                >
+                  Record Exit
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* FOOTER */}
+      <footer className="mt-8 border-t border-[#151922] pt-4 flex flex-col md:flex-row justify-between items-center text-[10px] text-slate-500 font-bold">
         <div className="flex items-center space-x-2">
-          <Globe size={12} className="text-[#a855f7]" />
-          <span>Obsidian Engine API v2.0 // Local fallback caching active</span>
+          <Globe size={12} className="text-purple-500" />
+          <span>Obsidian Engine API v2.0 // Active Workspace: Echo</span>
         </div>
         <div className="mt-2 md:mt-0">
-          Last background cron screening sync: {activeAnalysis.detailedIndicators.fundamentals ? "Completed Today 7:00 PM" : "Sync Pending"}
+          Last sync details: Real yfinance data feeds, pgvector matching, and local Kronos predictors active.
         </div>
       </footer>
 
