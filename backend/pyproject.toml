@@ -28,6 +28,8 @@ dependencies = [
     "langgraph>=1.2.4",
     # ── Cache / State ──────────────────────────────────────────────
     "redis>=8.0.0",
+    "psycopg2-binary",
+    "sqlalchemy>=2.0.30",
 ]
 
 [tool.uv]

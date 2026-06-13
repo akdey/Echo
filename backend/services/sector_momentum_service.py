@@ -22,7 +22,7 @@ import yfinance as yf
 import pandas as pd
 from typing import List, Dict, Any
 
-from backend.services.supabase_client import upsert_supabase, IS_SUPABASE_CONFIGURED
+from backend.services.db_handler import upsert_db, IS_DB_CONFIGURED
 
 logger = logging.getLogger(__name__)
 
@@ -155,9 +155,9 @@ async def calculate_sector_momentum() -> List[Dict[str, Any]]:
             logger.error("[SectorMomentum] Error processing %s: %s", sector_name, e)
             continue
 
-    if payload and IS_SUPABASE_CONFIGURED:
-        await upsert_supabase("sector_momentum", payload)
-        logger.info("[SectorMomentum] Upserted %d sector records to Supabase.", len(payload))
+    if payload and IS_DB_CONFIGURED:
+        await upsert_db("sector_momentum", payload)
+        logger.info("[SectorMomentum] Upserted %d sector records to database.", len(payload))
 
     # Sort: LEAD first, then IMPROVE, WEAKEN, LAG
     regime_order = {"LEAD": 0, "IMPROVE": 1, "WEAKEN": 2, "LAG": 3}

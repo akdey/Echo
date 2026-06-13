@@ -11,7 +11,7 @@ import yfinance as yf
 from typing import List, Dict, Any, Optional
 
 from backend.services.redis_pipeline import RedisPipeline
-from backend.services.supabase_client import query_supabase, upsert_supabase, delete_supabase, IS_SUPABASE_CONFIGURED
+from backend.services.db_handler import query_db, upsert_db, delete_db, IS_DB_CONFIGURED
 from backend.services.embeddings import generate_embedding
 
 logger = logging.getLogger(__name__)
@@ -278,9 +278,9 @@ class DataFetcher:
         Crawls backward from today to find and ingest the latest available EOD Bhavcopy.
         Also registers new company symbols, lazy-loads descriptions/embeddings from yfinance.
         """
-        if not IS_SUPABASE_CONFIGURED:
-            logger.warning("Supabase not configured. Ingestion aborted.")
-            return {"status": "error", "message": "Supabase not configured."}
+        if not IS_DB_CONFIGURED:
+            logger.warning("Database not configured. Ingestion aborted.")
+            return {"status": "error", "message": "Database not configured."}
             
         # 1. Scan backward to find latest available Bhavcopy
         target_date = datetime.date.today()
@@ -298,7 +298,7 @@ class DataFetcher:
         logger.info("Ingesting Bhavcopy for date: %s", target_date.isoformat())
         
         # 2. Get existing companies to avoid duplicates
-        existing = await query_supabase("companies", {"select": "symbol"})
+        existing = await query_db("companies", {"select": "symbol"})
         existing_symbols = {c["symbol"] for c in existing} if existing else set()
         
         # 3. Dynamic metadata resolution & Embedding generation
@@ -349,19 +349,19 @@ class DataFetcher:
             
         # 4. Upsert companies
         if companies_payload:
-            logger.info("Upserting %d new company metadata records into Supabase...", len(companies_payload))
-            await upsert_supabase("companies", companies_payload)
+            logger.info("Upserting %d new company metadata records into database...", len(companies_payload))
+            await upsert_db("companies", companies_payload)
             
         # 5. Upsert Bhavcopy EOD prices/delivery
         if bhavcopy_payload:
-            logger.info("Upserting %d Bhavcopy records into Supabase...", len(bhavcopy_payload))
-            await upsert_supabase("daily_bhavcopy", bhavcopy_payload)
+            logger.info("Upserting %d Bhavcopy records into database...", len(bhavcopy_payload))
+            await upsert_db("daily_bhavcopy", bhavcopy_payload)
             
         # 6. Apply Sliding Window Database Pruning (keep last 250 trading days)
         # We count historical dates and delete rows older than 250 days.
         try:
             # Fetch unique dates ordered descending
-            db_dates = await query_supabase("daily_bhavcopy", {
+            db_dates = await query_db("daily_bhavcopy", {
                 "select": "trade_date",
                 "order": "trade_date.desc",
                 "limit": 1000
@@ -370,7 +370,7 @@ class DataFetcher:
             if len(unique_dates) > 250:
                 cutoff_date = unique_dates[249]
                 logger.info("Pruning daily_bhavcopy rows older than date: %s", cutoff_date)
-                await delete_supabase("daily_bhavcopy", {"trade_date": f"lt.{cutoff_date}"})
+                await delete_db("daily_bhavcopy", {"trade_date": f"lt.{cutoff_date}"})
         except Exception as prune_err:
             logger.warning("Failed to prune database: %s", prune_err)
             
@@ -493,8 +493,8 @@ class InsiderDisclosureCrawler:
 
         Returns a summary dict with status and record counts.
         """
-        if not IS_SUPABASE_CONFIGURED:
-            return {"status": "error", "message": "Supabase not configured."}
+        if not IS_DB_CONFIGURED:
+            return {"status": "error", "message": "Database not configured."}
 
         # Find latest available file
         target_date = datetime.date.today()
@@ -599,7 +599,7 @@ class InsiderDisclosureCrawler:
             "[InsiderCrawler] Upserting %d insider disclosure records for %s...",
             len(payload), target_date.isoformat()
         )
-        await upsert_supabase("insider_disclosures", payload)
+        await upsert_db("insider_disclosures", payload)
 
         # Summary split by transaction type
         buys  = sum(1 for p in payload if p["transaction_type"] == "Buy")

@@ -27,13 +27,14 @@ from backend.services.risk_engine import (
     scan_exit_signals,
     get_position_size,
 )
-from backend.services.supabase_client import (
-    query_supabase,
-    upsert_supabase,
-    delete_supabase,
-    verify_supabase_connection,
-    IS_SUPABASE_CONFIGURED,
-    rpc_supabase
+from backend.services.db_handler import (
+    query_db,
+    upsert_db,
+    delete_db,
+    verify_db_connection,
+    IS_DB_CONFIGURED,
+    rpc_db,
+    init_db
 )
 import yfinance as yf
 import pandas as pd
@@ -148,15 +149,22 @@ async def startup_event():
         
     logger.info("Initializing system cache and database checks...")
     
-    # Verify Supabase connection
-    if IS_SUPABASE_CONFIGURED:
-        conn_ok = await verify_supabase_connection()
+    # Initialize SQLAlchemy database tables if not exist
+    try:
+        init_db()
+    except Exception as db_err:
+        logger.error("Database schema initialization failed: %s", db_err)
+
+    
+    # Verify database connection
+    if IS_DB_CONFIGURED:
+        conn_ok = await verify_db_connection()
         if conn_ok:
-            logger.info("Supabase PostgreSQL database connection verified successfully.")
+            logger.info("SQL database connection verified successfully.")
         else:
-            logger.warning("Supabase PostgreSQL connection failed. Check credentials.")
+            logger.warning("SQL database connection failed. Check connection parameters.")
     else:
-        logger.warning("Supabase credentials are not configured in environment.")
+        logger.warning("No database URL configured. Running on transient/fallback memory engines.")
 
     redis_pipeline = RedisPipeline()
     await redis_pipeline.connect()
@@ -254,7 +262,7 @@ async def thematic_analyze(payload: ThematicRequest):
 async def get_thematic_graph():
     """Retrieves all registered company profiles from Supabase."""
     try:
-        data = await query_supabase("companies", {"select": "symbol,name,sector,industry,market_cap_cr,description"})
+        data = await query_db("companies", {"select": "symbol,name,sector,industry,market_cap_cr,description"})
         return {"status": "success", "data": data}
     except Exception as e:
         logger.error("Failed to retrieve companies list: %s", str(e))
@@ -273,7 +281,7 @@ async def add_thematic_node(payload: NodeModel):
             "sector": "N/A",
             "industry": "N/A"
         }
-        await upsert_supabase("companies", [row])
+        await upsert_db("companies", [row])
         return {"status": "success", "message": f"Company profile '{payload.id}' added/updated."}
     except Exception as e:
         logger.error("Failed to add company profile: %s", str(e))
@@ -283,7 +291,7 @@ async def add_thematic_node(payload: NodeModel):
 async def delete_thematic_node(node_id: str):
     """Deletes a company profile from Supabase."""
     try:
-        await delete_supabase("companies", {"symbol": f"eq.{node_id.upper()}"})
+        await delete_db("companies", {"symbol": f"eq.{node_id.upper()}"})
         return {"status": "success", "message": f"Company '{node_id}' deleted."}
     except Exception as e:
         logger.error("Failed to delete company: %s", str(e))
@@ -348,13 +356,13 @@ async def run_conviction_matrix(payload: ConvictionRunRequest):
     Pass `symbols: ["RELIANCE.NS", "TCS.NS"]` to score a subset only.
     Pass no body to score ALL companies in the Supabase `companies` table.
     """
-    if not IS_SUPABASE_CONFIGURED:
+    if not IS_DB_CONFIGURED:
         raise HTTPException(status_code=503, detail="Supabase not configured.")
     try:
         logger.info("[API] Starting conviction scoring run...")
 
         # Pull current surveillance list from Supabase for trap detection
-        surv_rows = await query_supabase("surveillance", {"select": "symbol"})
+        surv_rows = await query_db("surveillance", {"select": "symbol"})
         surv_set  = {r["symbol"].replace(".NS", "").replace(".BO", "") for r in surv_rows}
 
         scored = await run_conviction_scoring(
@@ -386,7 +394,7 @@ async def get_conviction_list(min_score: int = 0, limit: int = 50):
     """
     limit = min(limit, 200)
     try:
-        rows = await query_supabase("conviction_matrix", {
+        rows = await query_db("conviction_matrix", {
             "select": "*",
             "conviction_score": f"gte.{min_score}",
             "order": "conviction_score.desc",
@@ -422,7 +430,7 @@ async def get_sector_heatmap():
     Each record contains: sector_name, rs_score, rs_change_4w, momentum_regime.
     """
     try:
-        rows = await query_supabase("sector_momentum", {
+        rows = await query_db("sector_momentum", {
             "select": "*",
             "order": "rs_score.desc",
         })
@@ -470,7 +478,7 @@ async def get_insider_disclosures(symbol: Optional[str] = None, limit: int = 100
     if symbol:
         params["symbol"] = f"eq.{symbol.upper()}"
     try:
-        rows = await query_supabase("insider_disclosures", params)
+        rows = await query_db("insider_disclosures", params)
         return {"status": "success", "count": len(rows), "disclosures": rows}
     except Exception as e:
         logger.error("[API] Failed to fetch insider disclosures: %s", e)
@@ -493,7 +501,7 @@ async def get_journal(symbol: Optional[str] = None):
     if symbol:
         params["symbol"] = f"eq.{symbol.upper()}"
     try:
-        rows = await query_supabase("trade_journal", params)
+        rows = await query_db("trade_journal", params)
         return {"status": "success", "count": len(rows), "entries": rows}
     except Exception as e:
         logger.error("[API] Failed to fetch trade journal: %s", e)
@@ -529,7 +537,7 @@ async def log_trade_entry(payload: TradeJournalEntry):
         "target_price":    payload.target_price,
     }
     try:
-        result = await upsert_supabase("trade_journal", [row])
+        result = await upsert_db("trade_journal", [row])
         return {"status": "success", "entry": result}
     except Exception as e:
         logger.error("[API] Failed to log trade entry: %s", e)
@@ -543,7 +551,7 @@ async def log_trade_exit(payload: TradeJournalExit):
     Computes P&L automatically from the entry price stored in Supabase.
     """
     try:
-        existing = await query_supabase("trade_journal", {
+        existing = await query_db("trade_journal", {
             "id": f"eq.{payload.trade_id}",
             "select": "entry_price,quantity",
         })
@@ -562,7 +570,7 @@ async def log_trade_exit(payload: TradeJournalExit):
             "outcome_notes": payload.outcome_notes,
             "updated_at":    __import__("datetime").datetime.utcnow().isoformat(),
         }
-        result = await upsert_supabase("trade_journal", [update_row])
+        result = await upsert_db("trade_journal", [update_row])
         return {"status": "success", "pnl": pnl, "entry": result}
     except HTTPException:
         raise
@@ -575,7 +583,7 @@ async def log_trade_exit(payload: TradeJournalExit):
 async def delete_journal_entry(trade_id: str):
     """Permanently deletes a trade journal entry."""
     try:
-        await delete_supabase("trade_journal", {"id": f"eq.{trade_id}"})
+        await delete_db("trade_journal", {"id": f"eq.{trade_id}"})
         return {"status": "success", "message": f"Trade {trade_id} deleted."}
     except Exception as e:
         logger.error("[API] Failed to delete journal entry: %s", e)
@@ -617,7 +625,7 @@ async def trigger_nightly_job():
         results["sector_momentum"] = {"status": "error", "detail": str(e)}
 
     try:
-        surv_rows = await query_supabase("surveillance", {"select": "symbol"})
+        surv_rows = await query_db("surveillance", {"select": "symbol"})
         surv_set  = {r["symbol"].replace(".NS", "").replace(".BO", "") for r in surv_rows}
         scored    = await run_conviction_scoring(surveillance_symbols=surv_set)
         results["conviction"] = await dispatch_conviction_alerts(scored)
@@ -915,7 +923,7 @@ async def get_news_signals(limit: int = 100):
     """Returns the processed news signals from Supabase news_signals table."""
     limit = min(limit, 200)
     try:
-        rows = await query_supabase("news_signals", {
+        rows = await query_db("news_signals", {
             "select": "*",
             "order": "processed_at.desc",
             "limit": str(limit),
@@ -931,11 +939,11 @@ async def get_conviction_overrides():
     """Returns all active (non-expired) conviction overrides."""
     try:
         # Call the helper RPC or query table directly
-        rows = await rpc_supabase("get_active_conviction_overrides", {})
+        rows = await rpc_db("get_active_conviction_overrides", {})
         if not rows:
             # Fall back to manual filter if RPC is not registered
             now_iso = __import__("datetime").datetime.utcnow().isoformat()
-            rows = await query_supabase("conviction_overrides", {
+            rows = await query_db("conviction_overrides", {
                 "select": "*",
                 "expires_at": f"gt.{now_iso}",
                 "limit": "200",
@@ -952,7 +960,7 @@ async def get_today_catalysts():
     try:
         # Query the view or run manual query
         now_iso = (__import__("datetime").datetime.utcnow() - __import__("datetime").timedelta(hours=24)).isoformat()
-        rows = await query_supabase("news_signals", {
+        rows = await query_db("news_signals", {
             "select": "*",
             "tier": "eq.2",
             "is_material_catalyst": "eq.true",
@@ -979,10 +987,10 @@ async def get_symbol_history(symbol: str, limit: int = 100):
         symbol += ".NS"
     
     rows = []
-    if IS_SUPABASE_CONFIGURED:
+    if IS_DB_CONFIGURED:
         try:
             # Query Supabase daily_bhavcopy table
-            rows = await query_supabase("daily_bhavcopy", {
+            rows = await query_db("daily_bhavcopy", {
                 "symbol": f"eq.{symbol}",
                 "order": "trade_date.desc",
                 "limit": str(limit),

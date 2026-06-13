@@ -17,7 +17,7 @@ from backend.services.data_fetcher import DataFetcher
 from backend.services.trend_models import TrendEvaluator
 from backend.services.valuation_models import ValuationEvaluator
 from backend.services.surveillance_compliance import SEBIComplianceGatekeeper
-from backend.services.supabase_client import query_supabase, upsert_supabase, delete_supabase, IS_SUPABASE_CONFIGURED
+from backend.services.db_handler import query_db, upsert_db, delete_db, IS_DB_CONFIGURED
 
 logger = logging.getLogger(__name__)
 
@@ -223,10 +223,10 @@ class ScreenerDaemon:
             t2t=surv_lists.get("t2t", [])
         )
         
-        # Sync to Supabase
-        if IS_SUPABASE_CONFIGURED:
+        # Sync to database
+        if IS_DB_CONFIGURED:
             try:
-                await delete_supabase("surveillance", {})
+                await delete_db("surveillance", {})
                 payload = []
                 for sym in surv_lists.get("asm", []):
                     payload.append({"symbol": sym + ".NS" if not sym.endswith(".NS") else sym, "measure_type": "ASM", "stage": 1})
@@ -235,10 +235,10 @@ class ScreenerDaemon:
                 for sym in surv_lists.get("t2t", []):
                     payload.append({"symbol": sym + ".NS" if not sym.endswith(".NS") else sym, "measure_type": "T2T", "stage": 1})
                 if payload:
-                    await upsert_supabase("surveillance", payload)
-                    logger.info("[Screener Daemon] Successfully synchronized %d surveillance rules to Supabase.", len(payload))
+                    await upsert_db("surveillance", payload)
+                    logger.info("[Screener Daemon] Successfully synchronized %d surveillance rules to database.", len(payload))
             except Exception as sync_err:
-                logger.error("[Screener Daemon] Failed to sync surveillance to Supabase: %s", sync_err)
+                logger.error("[Screener Daemon] Failed to sync surveillance to database: %s", sync_err)
         
         # Create a single requests session with rotated headers to share across requests
         session = get_resilient_session()

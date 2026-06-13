@@ -22,14 +22,14 @@ import yfinance as yf
 import pandas as pd
 from typing import List, Dict, Any, Optional
 
-from backend.services.supabase_client import (
-    query_supabase,
-    upsert_supabase,
-    IS_SUPABASE_CONFIGURED,
+from backend.services.db_handler import (
+    query_db,
+    upsert_db,
+    rpc_db,
+    IS_DB_CONFIGURED,
 )
 from backend.services.trend_models import TrendEvaluator
 from backend.services.embeddings import generate_embedding
-from backend.services.supabase_client import rpc_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,8 @@ def _clamp(score: int) -> int:
 
 
 async def _fetch_bhavcopy_df(symbol: str) -> Optional[pd.DataFrame]:
-    """Load EOD history from Supabase.  Returns None if insufficient."""
-    rows = await query_supabase("daily_bhavcopy", {
+    """Load EOD history from database.  Returns None if insufficient."""
+    rows = await query_db("daily_bhavcopy", {
         "symbol": f"eq.{symbol}",
         "order": "trade_date.asc",
         "limit": 250
@@ -139,12 +139,12 @@ async def _thematic_score(symbol: str, company_desc: str) -> int:
     Returns +20 if the company vector is close (≥ 0.35) to any macro theme seed.
     We check pre-existing similarity from pgvector for each theme embedding.
     """
-    if not IS_SUPABASE_CONFIGURED:
+    if not IS_DB_CONFIGURED:
         return 0
     for theme_query in MACRO_THEMES:
         try:
             theme_vec = generate_embedding(theme_query)
-            matches = await rpc_supabase("match_companies", {
+            matches = await rpc_db("match_companies", {
                 "query_embedding": theme_vec,
                 "match_threshold": 0.35,
                 "match_count": 5,
@@ -336,8 +336,8 @@ async def run_conviction_scoring(
 
     Returns a list of all scored records, sorted descending by conviction_score.
     """
-    if not IS_SUPABASE_CONFIGURED:
-        logger.warning("[Conviction] Supabase not configured — aborting.")
+    if not IS_DB_CONFIGURED:
+        logger.warning("[Conviction] Database not configured — aborting.")
         return []
 
     # ── REGIME GATE ───────────────────────────────────────────────
@@ -372,23 +372,23 @@ async def run_conviction_scoring(
     surv = surveillance_symbols or set()
 
     # ── Pre-fetch news overrides in ONE batch call ───────────────────────────
-    # (avoids N+1 Supabase queries inside score_single_ticker)
+    # (avoids N+1 database queries inside score_single_ticker)
     news_overrides = await _get_news_overrides()
     if news_overrides:
         logger.info(
-            "[Conviction] Loaded %d active news overrides from Supabase.",
+            "[Conviction] Loaded %d active news overrides from database.",
             len(news_overrides)
         )
 
-    # Load company list from Supabase if not provided
+    # Load company list from database if not provided
     if not symbols:
-        companies = await query_supabase("companies", {
+        companies = await query_db("companies", {
             "select": "symbol,description",
             "limit": 1000,
         })
         symbol_desc_map = {c["symbol"]: c.get("description", "") for c in companies}
     else:
-        rows = await query_supabase("companies", {
+        rows = await query_db("companies", {
             "select": "symbol,description",
             "limit": 1000,
         })
@@ -414,8 +414,8 @@ async def run_conviction_scoring(
             logger.error("[Conviction] Error scoring %s: %s", symbol, e)
 
     if results:
-        await upsert_supabase("conviction_matrix", results)
-        logger.info("[Conviction] Upserted %d conviction scores to Supabase.", len(results))
+        await upsert_db("conviction_matrix", results)
+        logger.info("[Conviction] Upserted %d conviction scores to database.", len(results))
 
     # Return sorted descending by conviction score
     results.sort(key=lambda x: x["conviction_score"], reverse=True)

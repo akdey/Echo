@@ -13,7 +13,7 @@ from backend.services.llm_gateway import query_llm, query_llm_structured
 from backend.services.trend_models import TrendEvaluator
 from backend.services.redis_pipeline import RedisPipeline
 from backend.services.embeddings import generate_embedding
-from backend.services.supabase_client import query_supabase, rpc_supabase, upsert_supabase, IS_SUPABASE_CONFIGURED
+from backend.services.db_handler import query_db, rpc_db, upsert_db, IS_DB_CONFIGURED
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +88,10 @@ class ThematicCatalystAnalyzer:
         3. Loads EOD Bhavcopy history to calculate delivery volume spikes and OBV accumulation.
         4. Applies operator upper circuit checks, liquidity gates, and catalyst exhaustion filters.
         """
-        if not IS_SUPABASE_CONFIGURED:
+        if not IS_DB_CONFIGURED:
             return {
                 "status": "error",
-                "reason": "Supabase credentials are not configured in environment."
+                "reason": "Database credentials are not configured in environment."
             }
 
         # Stage 1: Ingestion
@@ -113,7 +113,7 @@ class ThematicCatalystAnalyzer:
 
         # Try hybrid search first
         try:
-            matched_companies = await rpc_supabase("match_companies_hybrid", {
+            matched_companies = await rpc_db("match_companies_hybrid", {
                 "query_embedding":   query_vector,
                 "query_text":        search_query,
                 "match_threshold":   0.15,
@@ -135,7 +135,7 @@ class ThematicCatalystAnalyzer:
 
         # Fallback: pure semantic search
         if not matched_companies:
-            matched_companies = await rpc_supabase("match_companies", {
+            matched_companies = await rpc_db("match_companies", {
                 "query_embedding":   query_vector,
                 "match_threshold":   0.20,
                 "match_count":       10,
@@ -164,7 +164,7 @@ class ThematicCatalystAnalyzer:
             
             try:
                 # Stage 3: Fetch EOD Bhavcopy history from Supabase (Avoids yfinance rate limits!)
-                bhav_history = await query_supabase("daily_bhavcopy", {
+                bhav_history = await query_db("daily_bhavcopy", {
                     "symbol": f"eq.{symbol}",
                     "order": "trade_date.asc",
                     "limit": 250
@@ -209,7 +209,7 @@ class ThematicCatalystAnalyzer:
                             "delivery_pct": 35.0,
                             "turnover_cr": float(c["close"] * c["volume"] / 10000000.0)
                         })
-                    await upsert_supabase("daily_bhavcopy", db_rows)
+                    await upsert_db("daily_bhavcopy", db_rows)
                     bhav_history = db_rows
 
                 df = pd.DataFrame(bhav_history)
@@ -254,7 +254,7 @@ class ThematicCatalystAnalyzer:
 
                 # Estimate contract impact ratio
                 # Grab market cap from company details in Supabase
-                comp_profile = await query_supabase("companies", {"symbol": f"eq.{symbol}", "select": "market_cap_cr"})
+                comp_profile = await query_db("companies", {"symbol": f"eq.{symbol}", "select": "market_cap_cr"})
                 market_cap_cr = float(comp_profile[0].get("market_cap_cr", 0.0)) if comp_profile and comp_profile[0].get("market_cap_cr") else 0.0
                 
                 # Fallback to yfinance if not set in db
@@ -264,7 +264,7 @@ class ThematicCatalystAnalyzer:
                     mcap = info.get("marketCap", 0)
                     market_cap_cr = round(mcap / 10000000.0, 2) if mcap else 0.0
                     if market_cap_cr > 0:
-                        await upsert_supabase("companies", [{"symbol": symbol, "market_cap_cr": market_cap_cr}])
+                        await upsert_db("companies", [{"symbol": symbol, "market_cap_cr": market_cap_cr}])
 
                 impact_pct = (budget_cr / market_cap_cr) * 100.0 if budget_cr and market_cap_cr > 0 else 0.0
 

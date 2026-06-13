@@ -45,10 +45,10 @@ import numpy as np
 import yfinance as yf
 
 from backend.services.scraper_utils import fetch_nse_json, _make_session
-from backend.services.supabase_client import (
-    query_supabase,
-    upsert_supabase,
-    IS_SUPABASE_CONFIGURED,
+from backend.services.db_handler import (
+    query_db,
+    upsert_db,
+    IS_DB_CONFIGURED,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ class PreMarketSanityCheck:
             prev_close = fallback_prev_close
         if prev_close is None:
             try:
-                rows = await query_supabase("daily_bhavcopy", {
+                rows = await query_db("daily_bhavcopy", {
                     "symbol": f"eq.{symbol}",
                     "order": "trade_date.desc",
                     "limit": "1",
@@ -214,10 +214,10 @@ class PreMarketSanityCheck:
         Runs pre-market gap check on ALL open positions in the trade_journal
         (entries with no exit_date yet).
         """
-        if not IS_SUPABASE_CONFIGURED:
-            return [{"action": "ERROR", "reason": "Supabase not configured."}]
+        if not IS_DB_CONFIGURED:
+            return [{"action": "ERROR", "reason": "Database not configured."}]
 
-        open_trades = await query_supabase("trade_journal", {
+        open_trades = await query_db("trade_journal", {
             "select": "id,symbol,entry_price,stop_loss",
             "exit_date": "is.null",
             "limit": "200",
@@ -405,10 +405,10 @@ class MacroRegimeFilter:
             "timestamp": datetime.datetime.utcnow().isoformat(),
         }
 
-        # Persist regime change to Supabase for audit trail
-        if IS_SUPABASE_CONFIGURED:
+        # Persist regime change to database for audit trail
+        if IS_DB_CONFIGURED:
             try:
-                await upsert_supabase("risk_events", [{
+                await upsert_db("risk_events", [{
                     "event_type":     "REGIME_CHECK",
                     "regime":         overall_regime,
                     "trigger_reason": " | ".join(triggers) if triggers else "None",
@@ -493,8 +493,8 @@ class ChandelierExit:
           action           — "HOLD" | "EXIT_SIGNAL" | "INSUFFICIENT_DATA"
           distance_pct     — % distance of current price from stop (positive = above stop)
         """
-        # Fetch price history from Supabase
-        rows = await query_supabase("daily_bhavcopy", {
+        # Fetch price history from database
+        rows = await query_db("daily_bhavcopy", {
             "symbol": f"eq.{symbol}",
             "order":  "trade_date.asc",
             "limit":  "300",
@@ -578,10 +578,10 @@ class ChandelierExit:
         Scans all open positions in the trade journal for Chandelier Exit signals.
         Returns a list of results, EXIT_SIGNAL positions first.
         """
-        if not IS_SUPABASE_CONFIGURED:
+        if not IS_DB_CONFIGURED:
             return []
 
-        open_trades = await query_supabase("trade_journal", {
+        open_trades = await query_db("trade_journal", {
             "select":    "id,symbol,entry_date,entry_price",
             "exit_date": "is.null",
             "limit":     "200",
@@ -605,7 +605,7 @@ class ChandelierExit:
 
         # Persist exit signals to risk_events table
         exit_signals = [r for r in results if r["action"] == "EXIT_SIGNAL"]
-        if exit_signals and IS_SUPABASE_CONFIGURED:
+        if exit_signals and IS_DB_CONFIGURED:
             try:
                 events = [
                     {
@@ -617,7 +617,7 @@ class ChandelierExit:
                     }
                     for r in exit_signals
                 ]
-                await upsert_supabase("risk_events", events)
+                await upsert_db("risk_events", events)
             except Exception as e:
                 logger.warning("[Chandelier] Failed to persist exit signals: %s", e)
 
@@ -673,11 +673,11 @@ class KellyCriterion:
               "reasoning": str
             }
         """
-        if not IS_SUPABASE_CONFIGURED:
-            return self._default_response(total_capital, "Supabase not configured.")
+        if not IS_DB_CONFIGURED:
+            return self._default_response(total_capital, "Database not configured.")
 
         # Fetch all closed trades (have both entry_price and exit_price)
-        closed_trades = await query_supabase("trade_journal", {
+        closed_trades = await query_db("trade_journal", {
             "select":     "entry_price,exit_price,quantity",
             "exit_price": "not.is.null",
             "limit":      "500",

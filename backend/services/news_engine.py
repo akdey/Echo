@@ -45,10 +45,10 @@ from pydantic import BaseModel
 
 from backend.services.llm_gateway import query_llm_structured
 from backend.services.scraper_utils import _make_session, fetch_nse_json
-from backend.services.supabase_client import (
-    query_supabase,
-    upsert_supabase,
-    IS_SUPABASE_CONFIGURED,
+from backend.services.db_handler import (
+    query_db,
+    upsert_db,
+    IS_DB_CONFIGURED,
 )
 
 logger = logging.getLogger(__name__)
@@ -295,9 +295,9 @@ class MacroNewsEngine:
         # Clamp each sector override to [-20, +20]
         sector_overrides = {k: max(-20, min(20, v)) for k, v in sector_overrides.items()}
 
-        if signals_to_persist and IS_SUPABASE_CONFIGURED:
+        if signals_to_persist and IS_DB_CONFIGURED:
             try:
-                await upsert_supabase("news_signals", signals_to_persist)
+                await upsert_db("news_signals", signals_to_persist)
             except Exception as e:
                 logger.warning("[Tier1] Failed to persist macro signals: %s", e)
 
@@ -462,19 +462,19 @@ class CorporateAnnouncementCrawler:
                 logger.error("[Tier2] Error processing announcement: %s", e)
                 continue
 
-        # Persist to Supabase
-        if IS_SUPABASE_CONFIGURED:
+        # Persist to database
+        if IS_DB_CONFIGURED:
             try:
                 if signals_to_persist:
-                    await upsert_supabase("news_signals", signals_to_persist)
+                    await upsert_db("news_signals", signals_to_persist)
                 if overrides_to_write:
-                    await upsert_supabase("conviction_overrides", overrides_to_write)
+                    await upsert_db("conviction_overrides", overrides_to_write)
                     logger.info(
-                        "[Tier2] Wrote %d conviction overrides to Supabase.",
+                        "[Tier2] Wrote %d conviction overrides to database.",
                         len(overrides_to_write)
                     )
             except Exception as e:
-                logger.warning("[Tier2] Supabase persist failed: %s", e)
+                logger.warning("[Tier2] Database persist failed: %s", e)
 
         return {
             "status":             "success",
@@ -508,9 +508,9 @@ class WatchlistNewsScanner:
         seen    = set()
 
         # 1. Open positions (highest priority — protect capital)
-        if IS_SUPABASE_CONFIGURED:
+        if IS_DB_CONFIGURED:
             try:
-                open_trades = await query_supabase("trade_journal", {
+                open_trades = await query_db("trade_journal", {
                     "select":    "symbol",
                     "exit_date": "is.null",
                     "limit":     "20",
@@ -524,9 +524,9 @@ class WatchlistNewsScanner:
                 logger.warning("[Tier3] Could not fetch open positions: %s", e)
 
         # 2. High-conviction watchlist (fill remaining slots)
-        if IS_SUPABASE_CONFIGURED and len(symbols) < TIER3_MAX_SYMBOLS:
+        if IS_DB_CONFIGURED and len(symbols) < TIER3_MAX_SYMBOLS:
             try:
-                watchlist = await query_supabase("conviction_matrix", {
+                watchlist = await query_db("conviction_matrix", {
                     "select":            "symbol",
                     "conviction_score":  f"gte.50",
                     "order":             "conviction_score.desc",
@@ -613,7 +613,7 @@ class WatchlistNewsScanner:
                     })
 
                     # Only write overrides for significant sentiment signals
-                    if abs(sentiment.conviction_delta) >= 5 and IS_SUPABASE_CONFIGURED:
+                    if abs(sentiment.conviction_delta) >= 5 and IS_DB_CONFIGURED:
                         expires_at = (
                             datetime.datetime.utcnow() + datetime.timedelta(days=2)
                         ).isoformat()
@@ -639,14 +639,14 @@ class WatchlistNewsScanner:
                 logger.error("[Tier3] Error scanning %s: %s", symbol, e)
                 continue
 
-        if IS_SUPABASE_CONFIGURED:
+        if IS_DB_CONFIGURED:
             try:
                 if signals_to_persist:
-                    await upsert_supabase("news_signals", signals_to_persist)
+                    await upsert_db("news_signals", signals_to_persist)
                 if overrides_written:
-                    await upsert_supabase("conviction_overrides", overrides_written)
+                    await upsert_db("conviction_overrides", overrides_written)
             except Exception as e:
-                logger.warning("[Tier3] Supabase persist failed: %s", e)
+                logger.warning("[Tier3] Database persist failed: %s", e)
 
         return {
             "status":      "success",
@@ -668,11 +668,11 @@ async def fetch_active_overrides() -> Dict[str, int]:
     This is called by conviction_engine.score_single_ticker() to apply
     news-driven score adjustments to the base technical/fundamental score.
     """
-    if not IS_SUPABASE_CONFIGURED:
+    if not IS_DB_CONFIGURED:
         return {}
     try:
         now_iso = datetime.datetime.utcnow().isoformat()
-        rows = await query_supabase("conviction_overrides", {
+        rows = await query_db("conviction_overrides", {
             "select":     "symbol,override_points",
             "expires_at": f"gt.{now_iso}",
             "limit":      "500",
@@ -696,12 +696,12 @@ async def fetch_active_sector_overrides() -> Dict[str, int]:
     news_signals run.  Returns sector → adjustment_points dict.
     Used by conviction engine to apply broad sector adjustments.
     """
-    if not IS_SUPABASE_CONFIGURED:
+    if not IS_DB_CONFIGURED:
         return {}
     try:
         # Fetch Tier 1 signals from the last 8 hours
         cutoff = (datetime.datetime.utcnow() - datetime.timedelta(hours=8)).isoformat()
-        rows = await query_supabase("news_signals", {
+        rows = await query_db("news_signals", {
             "select":       "affected_sectors,conviction_adjustment",
             "tier":         "eq.1",
             "processed_at": f"gt.{cutoff}",
