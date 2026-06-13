@@ -15,6 +15,12 @@ This document provides a master-level, detailed breakdown of all features, their
 6. [Technical Trend & Structural Models (`trend_models.py`)](#6-technical-trend--structural-models)
 7. [Warren Buffett & Benjamin Graham Valuation Models (`valuation_models.py`)](#7-warren-buffett--benjamin-graham-valuation-models)
 8. [Autoregressive Kronos Simulation Service (`kronos_brain.py` & `kronos_api.py`)](#8-autoregressive-kronos-simulation-service)
+9. [Conviction Matrix & Scoring Engine (`conviction_engine.py`)](#9-conviction-matrix--scoring-engine)
+10. [Sector Rotation Heatmap Service (`sector_momentum_service.py`)](#10-sector-rotation-heatmap-service)
+11. [Insider & Promoter Disclosure Feed (`data_fetcher.py`)](#11-insider--promoter-disclosure-feed)
+12. [Private Trade Journal & Capital Preservation Ledger](#12-private-trade-journal--capital-preservation-ledger)
+13. [Three-Tier News Ingestion Engine (`news_engine.py`)](#13-three-tier-news-ingestion-engine)
+14. [Risk Engine & Portfolio Sizing Controls (`risk_engine.py`)](#14-risk-engine--portfolio-sizing-controls)
 
 ---
 
@@ -324,14 +330,161 @@ Evaluates the probability of trend survival using a local neural time-series mod
 
 ---
 
+## 9. Conviction Matrix & Scoring Engine
+### File Architecture
+* **Implementation File**: [conviction_engine.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/conviction_engine.py)
+
+### Feature Overview
+Calculates a comprehensive 0–100 Conviction Score for each Nifty 500 stock daily, combining multiple quantitative and qualitative data layers (Technicals, Smart Money, Thematic similarity, Fundamentals, and Traps) into an explainable score.
+
+### Technical Implementation Details
+* **Multi-Layer Score Assignment**:
+  - *Technicals (+30)*: Weinstein Stage 1 or Stage 2 breakout patterns on daily charts.
+  - *Smart Money (+30)*: Delivery volume spike from EOD Bhavcopy (≥45% delivery AND ≥2x 20-day average).
+  - *Thematic (+20)*: pgvector cosine similarity match against active macro themes (solar, defense, chips, railways, EV).
+  - *Fundamentals (+20)*: Positive operating cash flow (CFO) and return on capital employed (ROCE) ≥15%.
+  - *Trap Penalties (-50)*: Graded ASM/GSM surveillance, 60% run-up in 90 days, or 3 consecutive upper circuits.
+  - *News Catalyst Overrides (+30 / -30)*: Real-time sentiment boosts or vetoes loaded from the active overrides list.
+* **Alert Dispatch Trigger**: Integrates with `alert_dispatcher.py` to automatically dispatch Telegram alerts or styled SMTP emails for any ticker with conviction score ≥ 75.
+
+### Drawbacks & Limitations
+#### Technical Drawbacks
+* **Static Scoring Weights**: The allocation of points across layers (+30 technicals, +20 fundamentals, etc.) is hardcoded. It cannot dynamically adapt to changing market conditions (e.g., valuing momentum more in bull markets or value more in bear markets).
+* **N+1 DB Query Risk**: Fetching company details, EOD histories, and overrides in isolation would generate N+1 network queries. The system mitigates this by pre-fetching active news overrides and surveillance lists in batch.
+
+#### Practical & Market Drawbacks
+* **Lagging Fundamentals**: Operating cash flows and balance sheet metrics from yfinance are updated quarterly/annually, meaning the fundamental score is static for months and cannot detect deteriorating cash cycles in real time.
+* **No Portfolio Diversification Integration**: The score evaluates each company in isolation. It does not penalize overall portfolio overlap if 10 high-scoring stocks are in the same sector.
+
+---
+
+## 10. Sector Rotation Heatmap Service
+### File Architecture
+* **Implementation File**: [sector_momentum_service.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/sector_momentum_service.py)
+
+### Feature Overview
+Analyzes price relative strength (RS) for Nifty sectoral indices compared to the Nifty 50 benchmark over a rolling 6-month window to classify sectors into momentum quadrants (LEAD, IMPROVE, WEAKEN, LAG).
+
+### Technical Implementation Details
+* **Index Mapping**: Maps 13 sectoral indices (IT, Bank, Auto, Metal, etc.) to yfinance tickers.
+* **Regime Classification**:
+  - *LEAD*: RS > 1.0 and 4-week RS change ≥ 0 (outperforming and accelerating).
+  - *WEAKEN*: RS > 1.0 and 4-week RS change < 0 (outperforming but decelerating).
+  - *IMPROVE*: RS ≤ 1.0 and 4-week RS change ≥ 0 (underperforming but recovering).
+  - *LAG*: RS ≤ 1.0 and 4-week RS change < 0 (underperforming and declining).
+* **Supabase Synced**: Closes are calculated daily and the output table `sector_momentum` is upserted.
+
+### Drawbacks & Limitations
+#### Technical Drawbacks
+* **yfinance Scraping Fragility**: Sector indices are scraped using yfinance index tickers (e.g., `^CNXIT`). yfinance frequently rate-limits or returns missing rows for indices.
+* **Fixed Lookback Window**: The 4-week (20 trading days) rate of change window is static. Shorter cyclic movements are smoothed out, causing delayed rotation signals.
+
+#### Practical & Market Drawbacks
+* **Whipsaw Risk**: In rangebound or choppy markets, sectors frequently cross the RS 1.0 threshold back and forth, triggering false "Improve" or "Weaken" regime shifts that trigger unprofitable trades.
+* **Sector Ticker Mapping Divergence**: Stocks inside a sector might not behave like the sector index. For example, a defensive IT stock could rally during a sector-wide IT correction.
+
+---
+
+## 11. Insider & Promoter Disclosure Feed
+### File Architecture
+* **Implementation Files**: [data_fetcher.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/data_fetcher.py) (contains `InsiderDisclosureCrawler`)
+
+### Feature Overview
+Automatically scrapes the NSE SASTI database for promoter and director insider buy/sell transactions to track qualitative "Smart Money" movements.
+
+### Technical Implementation Details
+* **NSE SASTI Scraping**: Downloads the latest insider CSV filings from `archives.nseindia.com/corporate/sasti/`.
+* **Flexible Column Ingest**: Employs a column alias dictionary to resolve differences in CSV column formats across different archive releases.
+* **Idempotency Rules**: Applies a unique database index check to prevent duplicate records during repeat daily scraper runs.
+
+### Drawbacks & Limitations
+#### Technical Drawbacks
+* **NSE File Name Inconsistency**: NSE archives are sometimes uploaded late or with altered file naming formats, which can temporarily break the crawler.
+* **Unstructured Text Parsing**: Acquirer names are unstructured text and can contain typos or minor differences, making promoter aggregation difficult.
+
+#### Practical & Market Drawbacks
+* **Filing Time Lag**: Promoter disclosures are legally filed up to 2 trading days after the actual transaction. The promoter may buy at a lower price, and by the time the retail investor sees the disclosure, the price has already run up.
+* **Non-Market Transactions**: Off-market transfers, promoter gifts, and ESOP exercises are flagged as transactions but do not represent active open-market buying conviction.
+
+---
+
+## 12. Private Trade Journal & Capital Preservation Ledger
+### File Architecture
+* **Database Table**: `trade_journal` (Supabase schema)
+
+### Feature Overview
+Provides a secure trading log interface that enforces discipline by requiring a hard stop-loss and entry catalyst notes before logging any trade, calculating P&L automatically upon exit.
+
+### Technical Implementation Details
+* **Stop-Loss Validation**: The backend API rejects any long trade log where the stop loss is greater than or equal to the entry price.
+* **Automated P&L Calculation**: Upon trade exit patching, the server calculates real-time P&L:
+  $$\text{PnL} = (\text{exit\_price} - \text{entry\_price}) \times \text{quantity}$$
+* **Simulated Capital Integration**: Hooks into the UI header to calculate portfolio sizing limits based on available simulated equity (default ₹10,00,000).
+
+### Drawbacks & Limitations
+#### Technical Drawbacks
+* **No Broker Integration**: It is purely self-reported and lacks synchronization with real Indian brokers (Zerodha, Groww, AngelOne).
+* **Manual Data Entry**: Out-of-sync entry times and human errors in input prices degrade statistical accuracy.
+
+#### Practical & Market Drawbacks
+* **Emotional Bias in Logging**: Traded outcomes are logged manually. In practice, retail traders often delete losing trades or delay logging stop-loss hits, creating a false survival bias in their journal metrics.
+
+---
+
+## 13. Three-Tier News Ingestion Engine
+### File Architecture
+* **Implementation File**: [news_engine.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/news_engine.py)
+
+### Feature Overview
+Ingests news signals via a structured three-tier engine using DuckDuckGo Search and direct NSE corporate filing endpoints, processing stories using the local Gemma model to output sentiment shifts and conviction overrides.
+
+### Technical Implementation Details
+* **Tier 1 — Global Macro (8:30 AM IST)**: Runs 7 targeted DDG queries to assess interest rates (FED/RBI), oil, FII flows, and global risks. LLM derives sector adjustments (-20 to +20).
+* **Tier 2 — Corporate Announcements (Every 4 Hours)**: Fetches the 50 most recent regulatory disclosures from the NSE corporate announcements API. Triages headlines to isolate major events (order wins, earnings shocks) and triggers temporary conviction overrides (+30 to -30) that auto-expire in 3 trading days.
+* **Tier 3 — Watchlist Sentiment (Nightly)**: Dynamically queries DDG for open positions and high-conviction stocks. Passes snippets to LLM for small adjustments (+15 to -15).
+
+### Drawbacks & Limitations
+#### Technical Drawbacks
+* **DDG News Rate Limiting**: DuckDuckGo's news endpoints block IPs if queries are executed too quickly, requiring conservative delays (`DDGS_INTER_QUERY_DELAY_SEC = 2.0`).
+* **LLM Failure to Resolve Tickers**: Gemma must extract the NSE ticker symbol from the announcement. In obscure cases, the LLM fails to match the company name to its exact NSE code.
+
+#### Practical & Market Drawbacks
+* **Market Pre-emption (The TCS Deal Scenario)**: If TCS wins a major contract, it discloses it to the exchange at 8:00 AM. While Tier 2 catches this before the press publishes it, high-frequency algorithms still react to the exchange feed within milliseconds, meaning the opening price already gaps up before a retail trader can manually act on the dashboard alert.
+
+---
+
+## 14. Risk Engine & Portfolio Sizing Controls
+### File Architecture
+* **Implementation File**: [risk_engine.py](file:///Users/amitkumardey/Workspace/Projects/Echo/backend/services/risk_engine.py)
+
+### Feature Overview
+Enforces capital preservation rules using macro regime checks, pre-market gap sanity audits, ATR-14 Chandelier exits, and Half-Kelly position sizing.
+
+### Technical Implementation Details
+* **Macro Regime Filter**: Gates buy signals. If Nifty 50 closes below 20-day EMA, or Midcap 150 closes below 50-day EMA, or FII flows are heavily negative, the regime shifts to `RISK_OFF`, suppressing all buy signals.
+* **Pre-Market Gap Check (9:15:05 AM IST)**: Compares pre-open trade price to previous close. Flags gap-ups (>3%, abort buy) and gap-downs (>2%, caution).
+* **Chandelier Exit Stop**: Trailing stop calculated as:
+  $$\text{Stop} = \text{Highest Close Since Entry} - 3 \times \text{ATR14}$$
+* **Kelly Position Sizer**: Utilizes journal win rates to output optimal trade allocations.
+
+### Drawbacks & Limitations
+#### Technical Drawbacks
+* **Calculations on Cached Data**: Risk checks depend on yfinance data. If yfinance delayed endpoints do not serve the pre-open price by 9:15:05 AM, the check falls back to yesterday's close.
+
+#### Practical & Market Drawbacks
+* **Gap Risk at Open**: Chandelier exits protect intraday trends, but cannot prevent overnight gaps. If a stock gaps down 10% at the open due to global news, the stop-loss is bypassed and executed at a major loss.
+
+---
+
 ## Practical Architecture Matrix: Key System Trade-offs
 
 | System Component | Practical Implementation | Real-world Market Drawback | Ideal/Correct Production Alternative |
 | :--- | :--- | :--- | :--- |
-| **Thematic Arbitrage** | SQLite tables with simple relationships and SQL `JOIN` queries. | Single-hop query limit. Misses indirect, secondary, and tertiary supply chains where actual arbitrage alpha exists. | A native graph database (like Neo4j or Memgraph) to map multi-hop relationships. |
-| **Market Data Ingestion** | Dynamic `yfinance` fetches with randomized headers. | API rate-limiting, frequent blocks, and lack of real-time Level 2 depth for BSE/NSE stocks. | A direct, low-latency market data API subscription (e.g., Kite Connect or TrueData). |
-| **Order Book Analysis** | Logic to analyze Iceberg and Spoofing patterns in code. | L2/L3 data fields are hardcoded to `False` or empty due to the lack of a live order book feed. | A direct Level 3 MBO feed from an institutional broker. |
+| **Thematic Arbitrage** | Cosine similarity with local pgvector embeddings in Supabase. | Local MiniLM model lacks specialized financial/Indian industry domain knowledge. | Fine-tuned financial domain embeddings or hybrid search matching graph ontologies. |
+| **Market Data Ingestion** | EOD Bhavcopy parsing + yfinance API caching. | Lack of real-time intra-day data; rate-limiting blocks from Yahoo Finance. | A direct, low-latency market data API subscription (e.g., Kite Connect or TrueData). |
+| **Order Book Analysis** | Simulated WOFI score and bid/ask indicators. | Real-time Level 2/3 data is unavailable under free APIs, disabling active analysis. | Direct Level 3 MBO feed from an institutional broker. |
 | **Fundamental Audit** | Simple Graham formula and backward-looking Buffett scorecard. | Vulnerable to cyclical peaks (value traps) in heavy-capex PSU sectors (Defense/Railways). | Dynamic sector-specific models and forward earnings projections. |
-| **Regulatory Compliance** | Leaky-bucket rate limiter and dynamic list scraper. | Risk of Dynamic cloud IP shifts on Hugging Face Spaces violating static registered IP policies. | Dedicated cloud instance with a whitelisted, static Elastic IP. |
-| **Autoregressive Model** | local PyTorch model initialized on the fly. | The model operates on untrained weights, producing random-walk outputs. | A fully pre-trained model with regular training runs on historical NSE/BSE data. |
-| **News Catalyst Processing** | Google News RSS crawler and local LLM extraction. | RSS feeds are heavily lagged, meaning news is already priced in by the time the crawler runs. | A direct real-time news API feed (e.g., Bloomberg or Reuters terminal API). |
+| **Regulatory Compliance** | Leaky-bucket rate limiter and dynamic list scraper. | Outbound IP shifts on Hugging Face containers violate broker static IP requirements. | Dedicated cloud instance with a whitelisted, static Elastic IP. |
+| **Autoregressive Model** | Local PyTorch SimpleKronosModel. | Operates on untrained weights, yielding random walk trajectories. | A fully pre-trained model with regular training runs on historical NSE/BSE data. |
+| **News Catalyst Processing** | Three-Tier News Engine (DDG News and NSE Announcements API). | Rate limits on DDG searches; LLM extraction latency on CPU. | Direct real-time financial news API feed (e.g., Bloomberg or Reuters terminal API). |
+| **Risk & Position Sizing** | Historical journal stats with Kelly sizing and Chandelier exit. | Kelly sizing relies on self-reported logs; Chandelier exit cannot prevent overnight gaps. | Automated API broker integration for real-time stop-loss orders and account balance tracking. |

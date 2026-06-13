@@ -305,10 +305,48 @@ Streamed in real-time via Server-Sent Events (SSE) to the React dashboard
 
 ---
 
+### 13. Risk Engine & Position Sizing (`risk_engine.py`)
+
+Provides capital preservation rules and trailing stops to protect retail traders from market panics, flash crashes, and oversized losses.
+
+- **Macro Regime Filter**: Gates buy signals. If Nifty 50 closes below 20-day EMA, or Nifty Midcap 150 closes below 50-day EMA, or FII flows are heavily negative (<-60,000 Cr over 5 days), the regime shifts to `RISK_OFF`, suppressing all buy signals.
+- **Pre-Market Gap Check (9:15:05 AM IST)**: Automatically runs before market orders. Checks for abnormal gap-ups (>3%, abort buy) and gap-downs (>2%, caution).
+- **Chandelier Exit trailing stop**: Trailing stop calculated as `Highest Close Since Entry - 3 * ATR14`.
+- **Half-Kelly Position Sizer**: Utilizes historical trade win-rates and average R:R ratios to suggest the mathematically optimal capital allocation.
+
+**API**:
+```
+GET  /api/risk/regime      — returns macro regime state (RISK_ON / RISK_OFF)
+GET  /api/risk/premarket   — batch checks all open positions for opening gaps
+GET  /api/risk/exits       — calculates Chandelier stop and checks for exit triggers
+POST /api/risk/position-size — returns Kelly allocation percentage and INR value
+GET  /api/risk/portfolio   — returns combined results for the risk dashboard
+```
+
+---
+
+### 14. Three-Tier News Ingestion Engine (`news_engine.py`)
+
+Bypasses cloud scraping limits and anti-bot systems by using target queries and direct regulatory exchange feeds.
+
+- **Tier 1 (Global Macro)**: Runs 7 targeted DuckDuckGo News queries at 8:30 AM IST (FED, RBI, oil, FII flow, etc.). LLM evaluates sector-level boosts or vetoes (-20 to +20).
+- **Tier 2 (Corporate Announcements)**: Fetches the 50 most recent regulatory filings from the NSE corporate announcements API. Triages announcements and triggers temporary conviction overrides (+30 to -30) that expire automatically in 3 trading days.
+- **Tier 3 (Watchlist-Targeted Search)**: Dynamic weekly news query per watchlist/holding symbol (capped to 15 to stay under rate limits). LLM extracts net sentiment and adjusts conviction (-15 to +15).
+
+**API**:
+```
+POST /api/news/pipeline       — runs Tier 1, 2, and 3 news ingestion in sequence
+POST /api/news/crawl/{tier}   — triggers a crawl for a specific news tier
+GET  /api/news/signals        — returns processed news signals from news_signals table
+GET  /api/news/overrides      — returns active overrides from conviction_overrides table
+GET  /api/news/catalysts      — returns material corporate catalysts from today
+```
+
+---
+
 ## Database Schema
 
-Run `backend/supabase_migrations/phase12_conviction_schema.sql` in your Supabase
-SQL Editor to create all tables.
+Run the migration scripts in `backend/supabase_migrations/` in your Supabase SQL Editor to create all tables.
 
 | Table | Purpose |
 |---|---|
@@ -319,6 +357,8 @@ SQL Editor to create all tables.
 | `sector_momentum` | Nifty sectoral RS scores + regime classification |
 | `trade_journal` | Private trade entries with P&L tracking |
 | `conviction_matrix` | Daily 0-100 conviction scores (cached) |
+| `news_signals` | Processed news items across all three tiers |
+| `conviction_overrides` | Temporary conviction score adjustments with auto-expiry |
 
 ---
 
@@ -383,11 +423,11 @@ Echo merges **Warren Buffett / Benjamin Graham Value & Moat Quality** fundamenta
 
 ```mermaid
 graph TD
-    A[Background Crawler Daemon] -->|Scrapes Daily at 7:00 PM IST| B[(Redis Digital Twin)]
-    C[React Dashboard Visualizer] <-->|Rest APIs & SSE Transitions| D[FastAPI Gateway]
-    D <-->|Read Cache & Logs| B
+    A[Background Scrapers] -->|Daily EOD Bhavcopy & Insider SASTI| D[FastAPI Gateway]
+    C[React Dashboard Visualizer] <-->|Rest APIs & SSE Transitions| D
+    D <-->|Read/Write Cache| B[(Redis Digital Twin)]
     D -->|Autoregressive Monte Carlo| E[Kronos Simulation Service]
-    D <-->|Thematic Database & News Crawler| H[(SQLite Graph Database)]
+    D <-->|Thematic description & vectors| H[(Supabase pgvector PostgreSQL)]
     
     subgraph Local LLM Gateway
         D -->|ThreadPoolExecutor| F[llama-cpp-python]
@@ -401,7 +441,7 @@ graph TD
         K -->|Surveillance Router| L[4. News & Sentiment Node]
         L -->|Circuit Breaker Router| M[5. Kronos Simulation Gate]
         M -->|Regime Router| N[6. Risk Arbiter Node]
-        N --> O[7. simulated Paper Order]
+        N --> O[7. Simulated Paper Order]
     end
 ```
 

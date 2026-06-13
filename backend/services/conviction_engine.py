@@ -33,8 +33,9 @@ from backend.services.supabase_client import rpc_supabase
 
 logger = logging.getLogger(__name__)
 
-# Lazy import to avoid circular deps — only imported at runtime inside the function
+# Lazy imports to avoid circular dependencies
 _macro_regime_filter = None
+_fetch_overrides_fn  = None
 
 def _get_regime_filter():
     global _macro_regime_filter
@@ -42,6 +43,15 @@ def _get_regime_filter():
         from backend.services.risk_engine import MacroRegimeFilter
         _macro_regime_filter = MacroRegimeFilter()
     return _macro_regime_filter
+
+async def _get_news_overrides() -> Dict[str, int]:
+    """Lazy-loads and calls fetch_active_overrides from news_engine."""
+    try:
+        from backend.services.news_engine import fetch_active_overrides
+        return await fetch_active_overrides()
+    except Exception as e:
+        logger.warning("[Conviction] Could not load news overrides: %s", e)
+        return {}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -156,9 +166,16 @@ async def score_single_ticker(
     symbol: str,
     company_desc: str,
     surveillance_symbols: set,
+    news_overrides: Optional[Dict[str, int]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Computes the full Conviction Matrix for a single symbol.
+    
+    Args:
+        news_overrides: Pre-fetched dict of {symbol: override_points} from the
+                        news engine.  Passed in from run_conviction_scoring() to
+                        avoid N+1 Supabase queries.  Range: -30 to +30.
+    
     Returns a dict ready for Supabase upsert, or None if data is insufficient.
     """
 
@@ -229,8 +246,25 @@ async def score_single_ticker(
             trap_penalty += 10
             trap_reasons.append("3 Consecutive Upper Circuits")
 
+    # ── SCORE 6: News Catalyst Override (+30 / -30) ──────────────────────────
+    # Applied AFTER all structural scores — news amplifies confirmed setups,
+    # it doesn't manufacture conviction from thin air.
+    news_delta  = 0
+    news_reason = ""
+    if news_overrides:
+        news_delta = news_overrides.get(symbol, 0)
+        if news_delta != 0:
+            news_reason = f"News Override ({'+' if news_delta > 0 else ''}{news_delta} pts)"
+            logger.info(
+                "[Conviction] %s news override: %+d pts from active catalyst.",
+                symbol, news_delta
+            )
+
     # ── Compute raw score ─────────────────────────────────────────────────────
-    raw_score = tech_score + smart_money_score + thematic_score + fundamental_score - trap_penalty
+    raw_score = (
+        tech_score + smart_money_score + thematic_score +
+        fundamental_score - trap_penalty + news_delta
+    )
     conviction_score = _clamp(raw_score)
 
     # ── Derive stop-loss: most recent swing low (last 20 bars) ────────────────
@@ -248,6 +282,10 @@ async def score_single_ticker(
         catalyst_tags.append("Macro Theme Match")
     if fundamental_score > 0:
         catalyst_tags.append("Positive CFO + ROCE")
+    if news_delta > 0:
+        catalyst_tags.append(f"📰 {news_reason}")
+    elif news_delta < 0:
+        catalyst_tags.append(f"⚠️ {news_reason}")
     for t in trap_reasons:
         catalyst_tags.append(f"⚠ {t}")
 
@@ -333,6 +371,15 @@ async def run_conviction_scoring(
 
     surv = surveillance_symbols or set()
 
+    # ── Pre-fetch news overrides in ONE batch call ───────────────────────────
+    # (avoids N+1 Supabase queries inside score_single_ticker)
+    news_overrides = await _get_news_overrides()
+    if news_overrides:
+        logger.info(
+            "[Conviction] Loaded %d active news overrides from Supabase.",
+            len(news_overrides)
+        )
+
     # Load company list from Supabase if not provided
     if not symbols:
         companies = await query_supabase("companies", {
@@ -353,7 +400,10 @@ async def run_conviction_scoring(
 
     for symbol, description in symbol_desc_map.items():
         try:
-            scored = await score_single_ticker(symbol, description, surv)
+            scored = await score_single_ticker(
+                symbol, description, surv,
+                news_overrides=news_overrides,
+            )
             if scored:
                 results.append(scored)
                 logger.info(
