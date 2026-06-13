@@ -18,9 +18,9 @@ Supabase table.  Any stock with score >= 75 is flagged for async alerting.
 import asyncio
 import logging
 import datetime
-import yfinance as yf
 import pandas as pd
 from typing import List, Dict, Any, Optional
+from backend.services.screener_daemon import fetch_ticker_info_resiliently
 
 from backend.services.db_handler import (
     query_db,
@@ -103,30 +103,21 @@ async def _fetch_bhavcopy_df(symbol: str) -> Optional[pd.DataFrame]:
 
 async def _fetch_cfo_and_roce(symbol: str) -> Dict[str, Any]:
     """
-    Fetches Operating Cash Flow and Return on Capital Employed from yfinance.
+    Fetches Operating Cash Flow and Return on Capital Employed from Yahoo.
     Returns dict with keys: cfo_positive (bool), roce_pct (float).
     Falls back to neutral (cfo_positive=False, roce_pct=0) on any failure.
     """
     result = {"cfo_positive": False, "roce_pct": 0.0}
-    loop = asyncio.get_event_loop()
     try:
-        ticker_obj = yf.Ticker(symbol)
-        cashflow = await loop.run_in_executor(None, lambda: ticker_obj.cashflow)
-        if not cashflow.empty:
-            for row_name in ["Operating Cash Flow",
-                             "Cash Flow From Operating Activities",
-                             "OperatingCashFlow"]:
-                if row_name in cashflow.index:
-                    cfo = float(cashflow.loc[row_name].iloc[0])
-                    result["cfo_positive"] = cfo > 0
-                    break
-
-        info = await loop.run_in_executor(None, lambda: ticker_obj.info)
-        # ROCE proxy: EBIT / (Total Assets - Current Liabilities)
-        # yfinance doesn't expose ROCE directly; we derive it from ROE + debtToEquity
+        import requests
+        session = requests.Session()
+        info = await fetch_ticker_info_resiliently(symbol, session)
+        
+        cfo = float(info.get("operatingCashflow", 0))
+        result["cfo_positive"] = cfo > 0
+        
         roe = _safe_float(info.get("returnOnEquity"), 0.0) * 100.0
         roa = _safe_float(info.get("returnOnAssets"), 0.0) * 100.0
-        # Use average of ROE and ROA as a conservative ROCE proxy
         roce_proxy = (roe + roa) / 2.0
         result["roce_pct"] = roce_proxy
     except Exception as e:

@@ -4,6 +4,7 @@ import random
 import re
 import pandas as pd
 import requests
+from curl_cffi import requests as curl_requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from datetime import datetime
@@ -52,48 +53,83 @@ def get_resilient_session() -> requests.Session:
 
 async def fetch_ticker_info_resiliently(ticker: str, session: requests.Session, current_price: Optional[float] = None) -> Dict[str, Any]:
     """
-    Fetches fundamental metrics from yfinance using exponential backoff retries with randomized jitter.
-    No mock data is returned; if yfinance fails after retries, returns a safe default structure to prevent skipping.
+    Fetches fundamental metrics directly from Yahoo Finance API using curl_cffi.
+    Bypasses yfinance entirely to prevent rate limit blocks.
     """
-    import yfinance as yf
-    max_retries = 3
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+    params = {
+        "modules": "financialData,defaultKeyStatistics,summaryProfile,price"
+    }
     
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    max_retries = 3
     for attempt in range(max_retries):
         try:
-            ticker_obj = yf.Ticker(ticker, session=session)
+            logger.info("Fetching Yahoo quoteSummary for %s, attempt %d/%d...", ticker, attempt + 1, max_retries)
             loop = asyncio.get_event_loop()
             
-            # Run yfinance blocking calls in the executor pool
-            info = await loop.run_in_executor(None, lambda: ticker_obj.info)
+            def make_request():
+                s = curl_requests.Session(impersonate="chrome110")
+                s.headers.update(headers)
+                return s.get(url, params=params, timeout=10)
+
+            resp = await loop.run_in_executor(None, make_request)
             
-            if info and isinstance(info, dict):
-                # Ensure currentPrice or previousClose exists
-                if "currentPrice" not in info and "previousClose" in info:
-                    info["currentPrice"] = info["previousClose"]
-                if "currentPrice" not in info and current_price is not None:
-                    info["currentPrice"] = current_price
+            if resp.status_code != 200:
+                raise ValueError(f"Yahoo API returned status code {resp.status_code}")
                 
-                # If we successfully got info and it has a price, return it
-                if "currentPrice" in info:
-                    return info
-            raise ValueError("Empty or invalid info structure returned from yfinance")
+            data = resp.json()
+            result = data.get("quoteSummary", {}).get("result", [])
+            if not result:
+                raise ValueError("Empty result list in Yahoo API response")
+                
+            metrics = result[0]
+            fin_data = metrics.get("financialData", {})
+            stats = metrics.get("defaultKeyStatistics", {})
+            profile = metrics.get("summaryProfile", {})
+            price_data = metrics.get("price", {})
+            
+            def get_raw(d, key, default=0.0):
+                val = d.get(key)
+                if isinstance(val, dict):
+                    return val.get("raw", default)
+                return default if val is None else val
+
+            info = {
+                "currentPrice": get_raw(fin_data, "currentPrice", current_price),
+                "previousClose": get_raw(price_data, "regularMarketPreviousClose", current_price),
+                "longName": price_data.get("longName", ticker),
+                "sector": profile.get("sector", "N/A"),
+                "industry": profile.get("industry", "N/A"),
+                "returnOnAssets": get_raw(fin_data, "returnOnAssets", 0.05),
+                "returnOnEquity": get_raw(fin_data, "returnOnEquity", 0.05),
+                "debtToEquity": get_raw(fin_data, "debtToEquity", 0.0),
+                "operatingMargins": get_raw(fin_data, "operatingMargins", 0.05),
+                "ebitdaMargins": get_raw(fin_data, "ebitdaMargins", 0.05),
+                "trailingEps": get_raw(stats, "trailingEps", 0.0),
+                "forwardEps": get_raw(stats, "forwardEps", 0.0),
+                "earningsGrowth": get_raw(stats, "earningsGrowth", 0.0),
+                "operatingCashflow": get_raw(fin_data, "operatingCashflow", 0),
+            }
+            
+            if not info["currentPrice"] and current_price is not None:
+                info["currentPrice"] = current_price
+            if not info["previousClose"] and info["currentPrice"]:
+                info["previousClose"] = info["currentPrice"]
+                
+            return info
             
         except Exception as e:
-            logger.warning(
-                "[Screener Daemon] Attempt %d to fetch fundamentals for %s failed. Error: %s",
-                attempt + 1, ticker, str(e)
-            )
+            logger.warning("[Screener Daemon] Attempt %d to fetch fundamentals for %s failed: %s", attempt + 1, ticker, e)
             if attempt < max_retries - 1:
-                # Exponential backoff: sleep 10s on first fail, 30s on second, with randomized jitter
                 sleep_time = (5.0 * (attempt + 1)) + random.uniform(1.0, 3.0)
-                logger.info("[Screener Daemon] Rate limit / connection error. Backing off for %.2f seconds...", sleep_time)
                 await asyncio.sleep(sleep_time)
             else:
-                logger.warning(
-                    "[Screener Daemon] All attempts to fetch info for %s failed. Falling back to default neutral profile.",
-                    ticker
-                )
-                # Create a default neutral profile compliant with the "No Mocks" rule
+                logger.warning("[Screener Daemon] Fallback to default neutral profile for %s", ticker)
                 price = current_price if current_price is not None else 0.5
                 return {
                     "currentPrice": price,
@@ -109,6 +145,7 @@ async def fetch_ticker_info_resiliently(ticker: str, session: requests.Session, 
                     "trailingEps": 0.0,
                     "forwardEps": 0.0,
                     "earningsGrowth": 0.0,
+                    "operatingCashflow": 0,
                 }
 
 class ScreenerDaemon:
@@ -267,12 +304,7 @@ class ScreenerDaemon:
                         except Exception as parse_err:
                             logger.warning("Failed to parse updated_at for %s: %s", ticker, str(parse_err))
 
-                # Delay between tickers with randomized interval (2.0 to 5.0 seconds) to bypass WAF limits
-                sleep_interval = random.uniform(2.0, 5.0)
-                logger.info("Sleeping %.2f seconds before fetching next ticker: %s", sleep_interval, ticker)
-                await asyncio.sleep(sleep_interval)
-                
-                # 1. Fetch price data and sync to Redis
+                # 1. Fetch price data and sync to Redis (Checks database first, no rate limits!)
                 success = await self.data_fetcher.fetch_and_cache_ticker(ticker, period="250d", interval="1d", session=session)
                 if not success:
                     logger.warning("Failed to fetch price history for %s", ticker)
@@ -294,24 +326,7 @@ class ScreenerDaemon:
                 
                 weinstein = TrendEvaluator.evaluate_weinstein(df)
                 
-                # 4. Fetch ticker info fundamentals (resilient to yfinance rate limit errors)
-                # If it fails, raise the exception, skip the ticker, and write NO mock data.
-                info = await fetch_ticker_info_resiliently(ticker, session, current_price=float(df["close"].iloc[-1]))
-                
-                # 5. Run Valuation and Moat Models
-                valuation = ValuationEvaluator.calculate_valuation(info)
-                buffett_scorecard = ValuationEvaluator.generate_buffett_scorecard(valuation)
-                
-                # 6. Check SEBI surveillance lists
-                surveillance = self.compliance.verify_surveillance_status(ticker)
-                
-                # 7. Get Entry Timing Assessment
-                timing = TrendEvaluator.get_entry_timing_assessment(df, weinstein, fvgs)
-                
-                # 8. Scrape bulk deals
-                deals = await self.scrape_bulk_block_deals(ticker)
-                
-                # Retail Safety Guardrails
+                # --- Cheap Hard Veto Gates (Lazy Evaluation) ---
                 # A. Minimum Liquidity Gate (20-day average turnover < 5 Crores)
                 if "turnover_cr" in df.columns:
                     df["turnover_cr"] = df["turnover_cr"].astype(float)
@@ -322,24 +337,73 @@ class ScreenerDaemon:
                     
                 is_illiquid = avg_turnover_20d < 5.0
                 
+                # B. Trend filter gate: We only buy Stage 2 Breakouts / Stage 1 Accumulations.
+                # Stage 3 or 4 markdown are blocked early.
+                is_unfavorable_trend = weinstein["stage"] not in ["Stage 2 (Markup)", "Stage 1 (Accumulation)"]
+                
+                # C. Check SEBI surveillance lists (cheap memory check)
+                surveillance = self.compliance.verify_surveillance_status(ticker)
+                
+                is_blocked_early = surveillance["is_blocked"] or is_illiquid or is_unfavorable_trend
+                
+                # Fetch fundamentals ONLY if the ticker is NOT blocked early
+                info = {}
+                cfo_is_negative = False
+                valuation = {}
+                buffett_scorecard = {}
+                
+                if not is_blocked_early:
+                    # Delay between candidates to prevent hitting Yahoo API too rapidly
+                    sleep_interval = random.uniform(2.0, 4.0)
+                    logger.info("Sleeping %.2f seconds before fetching Yahoo fundamentals for candidate: %s", sleep_interval, ticker)
+                    await asyncio.sleep(sleep_interval)
+                    
+                    # 4. Fetch ticker info fundamentals via raw Yahoo API (using curl_cffi)
+                    info = await fetch_ticker_info_resiliently(ticker, session, current_price=float(df["close"].iloc[-1]))
+                    cfo_is_negative = float(info.get("operatingCashflow", 0)) < 0
+                    
+                    # 5. Run Valuation and Moat Models
+                    valuation = ValuationEvaluator.calculate_valuation(info)
+                    buffett_scorecard = ValuationEvaluator.generate_buffett_scorecard(valuation)
+                else:
+                    logger.info("Skipping Yahoo API queries for blocked/unfavorable ticker: %s (Weinstein: %s, Illiquid: %s)", 
+                                ticker, weinstein["stage"], is_illiquid)
+                    price = float(df["close"].iloc[-1])
+                    info = {
+                        "currentPrice": price,
+                        "previousClose": price,
+                        "longName": ticker,
+                        "sector": "N/A",
+                        "industry": "N/A",
+                        "operatingCashflow": 0,
+                    }
+                    valuation = {
+                        "roce": 0.05,
+                        "roe": 0.05,
+                        "cfo_to_net_income": 1.0,
+                        "debt_to_equity": 0.0,
+                        "moat_rating": "None",
+                        "intrinsic_value": 0.0,
+                        "margin_of_safety": 0.0,
+                        "is_undervalued": False,
+                    }
+                    buffett_scorecard = {
+                        "score": 0,
+                        "max_score": 5,
+                        "passes": []
+                    }
+                
+                # 6. Get Entry Timing Assessment
+                timing = TrendEvaluator.get_entry_timing_assessment(df, weinstein, fvgs)
+                
+                # 7. Scrape bulk deals
+                deals = await self.scrape_bulk_block_deals(ticker)
+                
                 # B. Operator Trap Check (3 consecutive upper circuits + negative Operating Cash Flow)
                 hit_upper_circuits_3d = False
                 if "is_upper_circuit" in df.columns:
                     hit_upper_circuits_3d = bool(df["is_upper_circuit"].iloc[-3:].all())
                 
-                cfo_is_negative = False
-                try:
-                    loop = asyncio.get_event_loop()
-                    cfo_data = await loop.run_in_executor(None, lambda: yf.Ticker(ticker).cashflow)
-                    if not cfo_data.empty:
-                        for row_name in ["Operating Cash Flow", "Cash Flow From Operating Activities", "OperatingCashFlow"]:
-                            if row_name in cfo_data.index:
-                                latest_cfo = float(cfo_data.loc[row_name].iloc[0])
-                                cfo_is_negative = latest_cfo < 0
-                                break
-                except Exception:
-                    pass
-                    
                 is_operator_trap = hit_upper_circuits_3d and cfo_is_negative
                 
                 # Combine surveillance and safety gates
